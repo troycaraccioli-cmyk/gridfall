@@ -6,18 +6,22 @@ A Safari / iPad–friendly **Progressive Web App**: a short 3D turn-based strate
 
 ## App name
 
-**Gridfall** — cyan forces vs Ember AI on an 8×8 tabletop grid. Capture the gold crystal or wipe out the enemy (~5–10 minutes).
+**Gridfall** — cyan forces (SW) vs three rival AI armies — **Ember**, **Ash**, and **Cinder** — on a **16×16** tabletop grid. **Wipeout only:** defeat every rival unit to win (~5–15 minutes).
 
 ## How to play (quick)
 
 1. Tap a **cyan** unit to select it.
 2. Tap a **blue** tile to move, or a **red** enemy to attack.
-3. Tap **End Turn** — the Ember AI moves automatically.
-4. **Win** by destroying all enemies or standing on the center crystal. **Lose** if your army is wiped (or Ember takes the crystal).
+3. Tap **End Turn** — Ember, Ash, and Cinder move automatically.
+4. **Win** by wiping out all rival armies. **Lose** if your army is wiped.
 
-**Units:** Infantry (move 3, melee) · Archer (move 2, ranged 2–3) · Bastion (move 2, high HP, melee).
+**Armies:** Cyan (you, SW) · Ember (SE) · Ash (NW) · Cinder (NE) — 10 units each (1 Bastion, 5 Infantry, 4 Archers).
+
+**Units:** Infantry (move 3, melee) · Archer (move 2, ranged) · Bastion (move 2, high HP, melee).
 
 **Camera:** drag with one finger to orbit; pinch to zoom.
+
+**After an update:** hard-refresh the page, or clear site data for this origin, so the service worker picks up the new cache.
 
 ## Run locally
 
@@ -85,7 +89,7 @@ ipad-strategy-pwa/
 
 - Static front-end only; Three.js loaded from jsDelivr CDN via import map.
 - Touch-first HUD (large buttons, tap-to-select / tap-to-act; no hover-only UX).
-- Optional service worker caches the app shell for demo reopen; clear site data if you need a hard refresh after updates.
+- Optional service worker caches the app shell for demo reopen; **hard-refresh or clear site data** after updates so the new cache version loads.
 
 
 ## Current hosting (this box)
