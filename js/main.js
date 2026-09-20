@@ -27,7 +27,7 @@ function isEnemy(u) { return u.faction !== 'player'; }
 
 const $ = (id) => document.getElementById(id);
 
-const BUILD_ID = 'gridfall-v18';
+const BUILD_ID = 'gridfall-v19';
 
 const ui = {
   title: $('title-screen'),
@@ -51,7 +51,7 @@ const ui = {
 
 let scene, camera, renderer, controls, raycaster, pointer;
 let boardGroup, highlightGroup, unitsGroup;
-let tiles = []; // {x,z,mesh,obstacle}
+let tiles = []; // {x,z,mesh,obstacle,river,bridge,height}
 let units = [];
 let selected = null;
 let reachable = new Set();
@@ -106,6 +106,8 @@ const DIRS8 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
 
 /** Canonical ortho cliff-edge keys only (v2: not inferred from raw |Δh|). */
 let cliffEdges = new Set();
+/** Water materials for cheap emissive pulse (Feel geography). */
+let waterMats = [];
 
 function key(x, z) { return `${x},${z}`; }
 
@@ -168,7 +170,7 @@ function initThree() {
   sun.shadow.camera.top = 12;
   sun.shadow.camera.bottom = -12;
   scene.add(sun);
-  const fill = new THREE.DirectionalLight(0x4488ff, 0.35);
+  const fill = new THREE.DirectionalLight(0x4499ff, 0.37);
   fill.position.set(-8, 6, -6);
   scene.add(fill);
 
@@ -244,6 +246,71 @@ function isCliffEdge(ax, az, bx, bz) {
 function isCliffDown(fromX, fromZ, toX, toZ) {
   return isCliffEdge(fromX, fromZ, toX, toZ)
     && tileHeight(fromX, fromZ) > tileHeight(toX, toZ);
+}
+
+function cliffEndpointKeys() {
+  const s = new Set();
+  for (const ek of cliffEdges) {
+    const parts = ek.split('|');
+    if (parts.length === 2) {
+      s.add(parts[0]);
+      s.add(parts[1]);
+    }
+  }
+  return s;
+}
+
+function isWater(x, z) {
+  const t = tileAt(x, z);
+  return !!(t && t.river && !t.bridge);
+}
+
+function isBridge(x, z) {
+  const t = tileAt(x, z);
+  return !!(t && t.bridge);
+}
+
+function blocksMove(x, z) {
+  const t = tileAt(x, z);
+  if (!t || t.obstacle) return true;
+  if (t.river && !t.bridge) return true;
+  return false;
+}
+
+/** Seeded tile color variation ±5%. */
+function jitterColor(col, u) {
+  const j = 1 + (u - 0.5) * 0.1;
+  col.r = Math.min(1, Math.max(0, col.r * j));
+  col.g = Math.min(1, Math.max(0, col.g * j));
+  col.b = Math.min(1, Math.max(0, col.b * j));
+  return col;
+}
+
+function landBandColor(tHigh, wet, u) {
+  let col;
+  if (tHigh < 0.35) {
+    const a = new THREE.Color(0x3a3428);
+    const b = new THREE.Color(0x4a4030);
+    col = a.lerp(b, tHigh / 0.35);
+  } else if (tHigh < 0.72) {
+    const a = new THREE.Color(0x2f5a38);
+    const b = new THREE.Color(0x3d7a48);
+    col = a.lerp(b, (tHigh - 0.35) / 0.37);
+  } else {
+    const a = new THREE.Color(0x5a6570);
+    const b = new THREE.Color(0x6a7380);
+    col = a.lerp(b, (tHigh - 0.72) / 0.28);
+  }
+  jitterColor(col, u);
+  if (wet) col.lerp(new THREE.Color(0x243028), 0.55);
+  return col;
+}
+
+function landRoughness(tHigh, wet) {
+  if (wet) return 0.92;
+  if (tHigh < 0.35) return 0.88;
+  if (tHigh < 0.72) return 0.82;
+  return 0.92;
 }
 
 /**
@@ -560,7 +627,7 @@ function pickSoftExploreTile(faction) {
       ? mid + Math.floor(Math.random() * (GRID - mid))
       : Math.floor(Math.random() * mid);
     const tile = tileAt(x, z);
-    if (tile && !tile.obstacle) return { x, z };
+    if (tile && !blocksMove(x, z)) return { x, z };
   }
   return { x: CENTER.x, z: CENTER.z };
 }
@@ -572,7 +639,7 @@ function applyBlindJitter(lx, lz) {
     const x = Math.max(0, Math.min(GRID - 1, lx + ox));
     const z = Math.max(0, Math.min(GRID - 1, lz + oz));
     const tile = tileAt(x, z);
-    if (tile && !tile.obstacle) return { x, z };
+    if (tile && !blocksMove(x, z)) return { x, z };
   }
   return { x: lx, z: lz };
 }
@@ -632,25 +699,65 @@ function attackTargetsFromMemory(unit) {
 }
 
 
-function buildBoard() {
-  while (boardGroup.children.length) boardGroup.remove(boardGroup.children[0]);
-  tiles = [];
 
-  // 20 rocks; keep all four spawn corners clear (no center objective)
+/** Flood on gen sets (before meshes) — 8-dir with water/cliff corner rules. */
+function walkableRegionFromSets(sx, sz, obstacles, riverSet, bridgeSet) {
+  const blocked = (x, z) => {
+    const k = key(x, z);
+    if (obstacles.has(k)) return true;
+    if (riverSet.has(k) && !bridgeSet.has(k)) return true;
+    return false;
+  };
+  const seen = new Set();
+  const q = [[sx, sz]];
+  seen.add(key(sx, sz));
+  while (q.length) {
+    const [x, z] = q.shift();
+    for (const [dx, dz] of DIRS8) {
+      const nx = x + dx, nz = z + dz;
+      if (!inBounds(nx, nz)) continue;
+      const nk = key(nx, nz);
+      if (seen.has(nk)) continue;
+      if (blocked(nx, nz)) continue;
+      if (dx !== 0 && dz !== 0) {
+        if (isCliffEdge(x, z, nx, z) || isCliffEdge(x, z, x, nz)) continue;
+        // corner-cut across open water
+        const midA = key(nx, z), midB = key(x, nz);
+        if ((riverSet.has(midA) && !bridgeSet.has(midA)) || (riverSet.has(midB) && !bridgeSet.has(midB))) continue;
+      } else if (isCliffEdge(x, z, nx, nz)) {
+        continue;
+      }
+      seen.add(nk);
+      q.push([nx, nz]);
+    }
+  }
+  return seen;
+}
+
+function banksLinkedByBridge(obstacles, riverSet, bridgeSet) {
+  // Cyan SW landmark ↔ Cinder NE must connect via bridge
+  if (obstacles.has(key(2, 2)) || obstacles.has(key(13, 13))) return false;
+  if (riverSet.has(key(2, 2)) && !bridgeSet.has(key(2, 2))) return false;
+  if (riverSet.has(key(13, 13)) && !bridgeSet.has(key(13, 13))) return false;
+  const withBr = walkableRegionFromSets(2, 2, obstacles, riverSet, bridgeSet);
+  if (!withBr.has(key(13, 13))) return false;
+  const emptyBr = new Set();
+  const without = walkableRegionFromSets(2, 2, obstacles, riverSet, emptyBr);
+  if (without.has(key(13, 13))) return false; // river didn't seal
+  return true;
+}
+
+function placeRocks(banned, cliffEnds, rand) {
   const obstacles = new Set();
-  const banned = new Set();
-  for (let z = 0; z < 5; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
-  for (let z = 0; z < 5; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
-  for (let z = GRID - 5; z < GRID; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
-  for (let z = GRID - 5; z < GRID; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
   const candidates = [];
   for (let z = 0; z < GRID; z++) {
     for (let x = 0; x < GRID; x++) {
-      if (!banned.has(key(x, z))) candidates.push([x, z]);
+      const k = key(x, z);
+      if (banned.has(k)) continue;
+      if (cliffEnds.has(k)) continue;
+      candidates.push([x, z]);
     }
   }
-  let seed = (Math.floor(Math.random() * 2147483646) + 1);
-  const rand = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
   for (let i = candidates.length - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
     [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
@@ -658,35 +765,448 @@ function buildBoard() {
   for (let i = 0; i < 20 && i < candidates.length; i++) {
     obstacles.add(key(candidates[i][0], candidates[i][1]));
   }
+  return obstacles;
+}
 
-  const heights = generateHeights(rand);
-  assertNoGenCliffs(heights);
-  injectCliffFault(heights, obstacles, banned, rand);
+function riverCellIllegal(x, z, riverSet, obstacles, banned, cliffEnds) {
+  if (!inBounds(x, z)) return true;
+  const k = key(x, z);
+  if (banned.has(k) || obstacles.has(k) || cliffEnds.has(k)) return true;
+  if (riverSet.has(k)) return true;
+  // Cannot mark both endpoints of any cliff edge as river
+  for (const ek of cliffEdges) {
+    const parts = ek.split('|');
+    if (parts.length !== 2) continue;
+    const [ax, az] = parts[0].split(',').map(Number);
+    const [bx, bz] = parts[1].split(',').map(Number);
+    const aR = riverSet.has(parts[0]) || (ax === x && az === z);
+    const bR = riverSet.has(parts[1]) || (bx === x && bz === z);
+    if (aR && bR) return true;
+  }
+  return false;
+}
+
+/**
+ * Winding 1-wide border-to-border river in mid-board band.
+ * Returns Set of "x,z" keys or null.
+ */
+function tryGenerateRiver(obstacles, banned, rand) {
+  const cliffEnds = cliffEndpointKeys();
+  const eastWest = rand() < 0.5;
+  const band = [5, 6, 7, 8, 9, 10];
+
+  const inSoftBand = (x, z) => {
+    if (eastWest) return z >= 4 && z <= 11;
+    return x >= 4 && x <= 11;
+  };
+
+  // Entry on start border inside mid band
+  const entries = [];
+  if (eastWest) {
+    for (const z of band) {
+      if (!riverCellIllegal(0, z, new Set(), obstacles, banned, cliffEnds)) entries.push([0, z]);
+    }
+  } else {
+    for (const x of band) {
+      if (!riverCellIllegal(x, 0, new Set(), obstacles, banned, cliffEnds)) entries.push([x, 0]);
+    }
+  }
+  if (!entries.length) return null;
+  const start = entries[Math.floor(rand() * entries.length)];
+
+  const path = [start];
+  const riverSet = new Set([key(start[0], start[1])]);
+  let x = start[0], z = start[1];
+  const targetCoord = GRID - 1;
+  const maxSteps = GRID * 6;
+
+  for (let step = 0; step < maxSteps; step++) {
+    const atEnd = eastWest ? (x === targetCoord) : (z === targetCoord);
+    if (atEnd && path.length >= 8) return riverSet;
+
+    const progress = eastWest ? x : z;
+    const options = [];
+    const ortho = eastWest
+      ? [[1, 0], [1, 1], [1, -1], [0, 1], [0, -1], [-1, 0]]
+      : [[0, 1], [1, 1], [-1, 1], [1, 0], [-1, 0], [0, -1]];
+
+    for (const [dx, dz] of ortho) {
+      const nx = x + dx, nz = z + dz;
+      if (riverCellIllegal(nx, nz, riverSet, obstacles, banned, cliffEnds)) continue;
+      if (!inSoftBand(nx, nz) && rand() > 0.15) continue; // rare jitter outside band
+      // Prefer forward progress
+      const nProg = eastWest ? nx : nz;
+      let w = 1;
+      if (nProg > progress) w = 6;
+      else if (nProg === progress) w = 2;
+      else w = 0.35;
+      // Prefer staying in hard mid band
+      if (eastWest ? (nz >= 5 && nz <= 10) : (nx >= 5 && nx <= 10)) w *= 1.5;
+      options.push({ nx, nz, w });
+    }
+
+    if (!options.length) {
+      // Backtrack
+      if (path.length <= 1) return null;
+      path.pop();
+      riverSet.delete(key(x, z));
+      [x, z] = path[path.length - 1];
+      continue;
+    }
+
+    let total = 0;
+    for (const o of options) total += o.w;
+    let r = rand() * total;
+    let pick = options[0];
+    for (const o of options) {
+      r -= o.w;
+      if (r <= 0) { pick = o; break; }
+    }
+    x = pick.nx; z = pick.nz;
+    path.push([x, z]);
+    riverSet.add(key(x, z));
+  }
+
+  const sealed = eastWest
+    ? [...riverSet].some((k) => +k.split(',')[0] === 0) && [...riverSet].some((k) => +k.split(',')[0] === GRID - 1)
+    : [...riverSet].some((k) => +k.split(',')[1] === 0) && [...riverSet].some((k) => +k.split(',')[1] === GRID - 1);
+  if (sealed && riverSet.size >= 8) return riverSet;
+  return null;
+}
+
+function forceFallbackRiver(obstacles, banned) {
+  // Guaranteed E–W cut at z=8 (skip illegal cells by shifting locally)
+  const cliffEnds = cliffEndpointKeys();
+  const riverSet = new Set();
+  let z = 8;
+  for (let x = 0; x < GRID; x++) {
+    let placed = false;
+    for (const dz of [0, -1, 1, -2, 2]) {
+      const zz = z + dz;
+      if (riverCellIllegal(x, zz, riverSet, obstacles, banned, cliffEnds)) continue;
+      riverSet.add(key(x, zz));
+      z = zz;
+      placed = true;
+      break;
+    }
+    if (!placed) {
+      // last resort: clear rock on mid cell
+      const zz = Math.max(5, Math.min(10, z));
+      obstacles.delete(key(x, zz));
+      if (!banned.has(key(x, zz)) && !cliffEnds.has(key(x, zz))) {
+        riverSet.add(key(x, zz));
+        z = zz;
+      }
+    }
+  }
+  return riverSet.size >= 8 ? riverSet : null;
+}
+
+/**
+ * Exactly one bridge of 1–2 contiguous river tiles.
+ * Returns Set of bridge keys or null.
+ */
+function placeBridge(riverSet, obstacles, banned, rand) {
+  const cliffEnds = cliffEndpointKeys();
+  const cells = [...riverSet].map((k) => {
+    const [x, z] = k.split(',').map(Number);
+    return { x, z, k };
+  });
+
+  const landNeighbors = (x, z) => {
+    const out = [];
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, nz = z + dz;
+      if (!inBounds(nx, nz)) continue;
+      const nk = key(nx, nz);
+      if (riverSet.has(nk)) continue;
+      if (obstacles.has(nk)) continue;
+      out.push({ x: nx, z: nz, dx, dz });
+    }
+    return out;
+  };
+
+  /** Prefer sites with walkable land on both sides of the local river cut. */
+  const bothBanks = (cells) => {
+    // Infer cut axis from river neighborhood: if more river along X, river is E–W (cut N/S)
+    let rivX = 0, rivZ = 0;
+    for (const c of cells) {
+      if (riverSet.has(key(c.x - 1, c.z)) || riverSet.has(key(c.x + 1, c.z))) rivX++;
+      if (riverSet.has(key(c.x, c.z - 1)) || riverSet.has(key(c.x, c.z + 1))) rivZ++;
+    }
+    const eastWestRiver = rivX >= rivZ; // separates N/S → need land with dz signs
+    const lands = [];
+    for (const c of cells) lands.push(...landNeighbors(c.x, c.z));
+    if (!lands.length) return false;
+    if (eastWestRiver) {
+      const hasN = lands.some((l) => l.z < Math.min(...cells.map((c) => c.z)) || l.dz < 0);
+      const hasS = lands.some((l) => l.z > Math.max(...cells.map((c) => c.z)) || l.dz > 0);
+      // Simpler: opposite dz signs among ortho land neighbors
+      const negs = lands.some((l) => l.dz < 0);
+      const poss = lands.some((l) => l.dz > 0);
+      return negs && poss;
+    }
+    const negs = lands.some((l) => l.dx < 0);
+    const poss = lands.some((l) => l.dx > 0);
+    return negs && poss;
+  };
+
+  const landNeighborOk = (x, z) => landNeighbors(x, z).length > 0;
+
+  const cliffDist = (x, z) => {
+    let best = Infinity;
+    for (const ck of cliffEnds) {
+      const [cx, cz] = ck.split(',').map(Number);
+      best = Math.min(best, chebyshev(x, z, cx, cz));
+    }
+    return best;
+  };
+
+  const singles = [];
+  for (const c of cells) {
+    if (banned.has(c.k) || cliffEnds.has(c.k)) continue;
+    if (!landNeighborOk(c.x, c.z)) continue;
+    singles.push(c);
+  }
+
+  const pairs = [];
+  for (const a of cells) {
+    for (const [dx, dz] of [[1, 0], [0, 1]]) {
+      const bx = a.x + dx, bz = a.z + dz;
+      const bk = key(bx, bz);
+      if (!riverSet.has(bk)) continue;
+      if (banned.has(a.k) || banned.has(bk)) continue;
+      if (cliffEnds.has(a.k) || cliffEnds.has(bk)) continue;
+      if (!landNeighborOk(a.x, a.z) && !landNeighborOk(bx, bz)) continue;
+      pairs.push([a, { x: bx, z: bz, k: bk }]);
+    }
+  }
+
+  const wantTwo = rand() < 0.5;
+  const tryList = [];
+  if (wantTwo && pairs.length) {
+    for (const p of pairs) tryList.push(p);
+    for (const s of singles) tryList.push([s]);
+  } else {
+    for (const s of singles) tryList.push([s]);
+    for (const p of pairs) tryList.push(p);
+  }
+
+  if (!tryList.length) return null;
+
+  // Prefer both-bank access, then soft ≥2 Chebyshev from cliff endpoints
+  tryList.sort((a, b) => {
+    const ba = bothBanks(a) ? 0 : 1;
+    const bb = bothBanks(b) ? 0 : 1;
+    if (ba !== bb) return ba - bb;
+    const da = Math.min(...a.map((c) => cliffDist(c.x, c.z)));
+    const db = Math.min(...b.map((c) => cliffDist(c.x, c.z)));
+    const sa = da >= 2 ? 0 : 1;
+    const sb = db >= 2 ? 0 : 1;
+    if (sa !== sb) return sa - sb;
+    return da - db;
+  });
+
+  const both = tryList.filter((p) => bothBanks(p));
+  const soft = (both.length ? both : tryList).filter(
+    (p) => Math.min(...p.map((c) => cliffDist(c.x, c.z))) >= 2
+  );
+  const pool = soft.length ? soft : (both.length ? both : tryList);
+  const pick = pool[Math.floor(rand() * pool.length)];
+  return new Set(pick.map((c) => c.k));
+}
+
+function forceFallbackBridge(riverSet, banned) {
+  const cliffEnds = cliffEndpointKeys();
+  const cells = [...riverSet].map((k) => {
+    const [x, z] = k.split(',').map(Number);
+    return { x, z, k };
+  }).filter((c) => !banned.has(c.k) && !cliffEnds.has(c.k));
+  // Prefer center-ish
+  cells.sort((a, b) => Math.abs(a.x - 7.5) + Math.abs(a.z - 7.5) - (Math.abs(b.x - 7.5) + Math.abs(b.z - 7.5)));
+  if (!cells.length) {
+    // absolute last resort
+    const any = [...riverSet][Math.floor(riverSet.size / 2)];
+    return new Set([any]);
+  }
+  return new Set([cells[0].k]);
+}
+
+function applyRiverChannelHeights(heights, riverSet, bridgeSet) {
+  // Lower open-water cells toward a flat channel; bridges keep near-bank height
+  for (const k of riverSet) {
+    if (bridgeSet.has(k)) continue;
+    const [x, z] = k.split(',').map(Number);
+    heights[z][x] = HEIGHT_MIN + HEIGHT_SPAN * 0.06;
+  }
+  for (const k of bridgeSet) {
+    const [x, z] = k.split(',').map(Number);
+    let sum = 0, n = 0;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, nz = z + dz;
+      if (!inBounds(nx, nz)) continue;
+      const nk = key(nx, nz);
+      if (riverSet.has(nk) && !bridgeSet.has(nk)) continue;
+      sum += heights[nz][nx];
+      n++;
+    }
+    heights[z][x] = n ? sum / n : HEIGHT_MIN + HEIGHT_SPAN * 0.2;
+  }
+  // Soft re-clamp away from fault edges; freeze river+bridge so channel holds
+  const frozen = new Set([...riverSet, ...bridgeSet]);
+  for (const ck of cliffEndpointKeys()) frozen.add(ck);
+  clampHeightSteps(heights, HEIGHT_STEP_MAX, cliffEdges, frozen);
+}
+
+function buildBoard() {
+  while (boardGroup.children.length) boardGroup.remove(boardGroup.children[0]);
+  tiles = [];
+  waterMats = [];
+
+  const banned = new Set();
+  for (let z = 0; z < 5; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
+  for (let z = 0; z < 5; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
+  for (let z = GRID - 5; z < GRID; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
+  for (let z = GRID - 5; z < GRID; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
+
+  let seed = (Math.floor(Math.random() * 2147483646) + 1);
+  const rand = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+
+  let heights = null;
+  let obstacles = new Set();
+  let riverSet = null;
+  let bridgeSet = null;
+
+  // Gen order: heights → cliff → rocks → river → bridge; river tries + cliff rerolls
+  for (let cliffAttempt = 0; cliffAttempt < 3; cliffAttempt++) {
+    heights = generateHeights(rand);
+    assertNoGenCliffs(heights);
+    injectCliffFault(heights, new Set(), banned, rand); // rocks come after cliff
+    const cliffEnds = cliffEndpointKeys();
+    obstacles = placeRocks(banned, cliffEnds, rand);
+
+    riverSet = null;
+    for (let r = 0; r < 16; r++) {
+      riverSet = tryGenerateRiver(obstacles, banned, rand);
+      if (riverSet) break;
+    }
+    if (!riverSet) continue; // reroll cliff (max 2 rerolls)
+
+    bridgeSet = placeBridge(riverSet, obstacles, banned, rand);
+    if (bridgeSet && bridgeSet.size >= 1) {
+      // Ensure bridge actually links opposite corners; else retry
+      if (banksLinkedByBridge(obstacles, riverSet, bridgeSet)) break;
+    }
+    bridgeSet = null;
+    riverSet = null;
+  }
+
+  if (!riverSet) {
+    heights = generateHeights(rand);
+    assertNoGenCliffs(heights);
+    injectCliffFault(heights, new Set(), banned, rand);
+    obstacles = placeRocks(banned, cliffEndpointKeys(), rand);
+    riverSet = forceFallbackRiver(obstacles, banned) || forceFallbackRiver(new Set(), banned);
+  }
+  if (!bridgeSet) {
+    bridgeSet = placeBridge(riverSet, obstacles, banned, rand) || forceFallbackBridge(riverSet, banned);
+  }
+
+  // Last-resort: try several bridge sites until banks link
+  if (!banksLinkedByBridge(obstacles, riverSet, bridgeSet)) {
+    let linked = false;
+    for (let i = 0; i < 24; i++) {
+      const alt = placeBridge(riverSet, obstacles, banned, rand) || forceFallbackBridge(riverSet, banned);
+      if (alt && banksLinkedByBridge(obstacles, riverSet, alt)) {
+        bridgeSet = alt;
+        linked = true;
+        break;
+      }
+    }
+    if (!linked) {
+      // Clear rocks near mid-board river to open approaches, then force center bridge
+      for (const k of [...riverSet]) {
+        const [x, z] = k.split(',').map(Number);
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [2, 0], [-2, 0], [0, 2], [0, -2]]) {
+          obstacles.delete(key(x + dx, z + dz));
+        }
+      }
+      bridgeSet = forceFallbackBridge(riverSet, banned);
+    }
+  }
+
+  // Bridge sits on river
+  for (const k of bridgeSet) riverSet.add(k);
+
+  applyRiverChannelHeights(heights, riverSet, bridgeSet);
+
+  // Neighbor wet-bank detection uses final river/bridge flags
+  const isOpenWaterKey = (k) => riverSet.has(k) && !bridgeSet.has(k);
 
   for (let z = 0; z < GRID; z++) {
     for (let x = 0; x < GRID; x++) {
-      const isObs = obstacles.has(key(x, z));
+      const k = key(x, z);
+      const isObs = obstacles.has(k);
+      const isRiv = riverSet.has(k);
+      const isBr = bridgeSet.has(k);
       const height = heights[z][x];
       const tHigh = (height - HEIGHT_MIN) / Math.max(1e-6, HEIGHT_MAX - HEIGHT_MIN);
-      // Seamless tiles (no visible gaps/lines): full TILE footprint, slight overlap
       const geo = new THREE.BoxGeometry(TILE * 1.02, 0.18 + height, TILE * 1.02);
-      const lowCol = new THREE.Color(0x16304f);
-      const highCol = new THREE.Color(0x3a6a4a);
-      const col = lowCol.clone().lerp(highCol, tHigh);
-      if (isObs) col.setHex(0x3a4558);
-      const tileOpacity = 0.55 + tHigh * 0.15; // ~0.55–0.70 translucent ground
-      const mat = new THREE.MeshStandardMaterial({
-        color: col,
-        roughness: 0.78,
-        metalness: 0.08,
-        transparent: true,
-        opacity: isObs ? 0.85 : tileOpacity,
-      });
-      if (!isObs && tHigh >= 0.7) {
-        // Soft high-tile rim cue (top ~30% of height range)
-        mat.emissive = new THREE.Color(0x2a6a72);
-        mat.emissiveIntensity = 0.18;
+      const uJitter = ((x * 73 + z * 19) % 100) / 100;
+
+      let wet = false;
+      if (!isObs && !isRiv) {
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          if (isOpenWaterKey(key(x + dx, z + dz))) { wet = true; break; }
+        }
       }
+
+      let mat;
+      if (isBr) {
+        // Wooden bridge — more solid plank read
+        mat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(0x6b4a2e).lerp(new THREE.Color(0x8a6238), uJitter),
+          roughness: 0.75,
+          metalness: 0.05,
+          transparent: true,
+          opacity: 0.85,
+        });
+      } else if (isRiv) {
+        const wcol = new THREE.Color(0x0a3a52).lerp(new THREE.Color(0x0e4a62), uJitter);
+        mat = new THREE.MeshStandardMaterial({
+          color: wcol,
+          roughness: 0.25,
+          metalness: 0.35,
+          transparent: true,
+          opacity: 0.7,
+          emissive: new THREE.Color(0x0a3048),
+          emissiveIntensity: 0.1,
+        });
+        waterMats.push(mat);
+      } else if (isObs) {
+        mat = new THREE.MeshStandardMaterial({
+          color: 0x5c6574,
+          roughness: 0.9,
+          metalness: 0.08,
+          transparent: true,
+          opacity: 0.85,
+        });
+      } else {
+        const col = landBandColor(tHigh, wet, uJitter);
+        const tileOpacity = wet ? (0.52 + tHigh * 0.1) : (0.55 + tHigh * 0.15);
+        mat = new THREE.MeshStandardMaterial({
+          color: col,
+          roughness: landRoughness(tHigh, wet),
+          metalness: 0.06,
+          transparent: true,
+          opacity: tileOpacity,
+        });
+        if (!wet && tHigh >= 0.7) {
+          mat.emissive = new THREE.Color(0x2a6a72);
+          mat.emissiveIntensity = 0.18;
+        }
+      }
+
       const mesh = new THREE.Mesh(geo, mat);
       const p = worldPos(x, z);
       const topY = (0.18 + height) / 2;
@@ -696,7 +1216,47 @@ function buildBoard() {
       mesh.userData = { type: 'tile', x, z };
       boardGroup.add(mesh);
 
-      if (!isObs && tHigh >= 0.7) {
+      // Bridge side faces slightly darker
+      if (isBr) {
+        const side = new THREE.Mesh(
+          new THREE.BoxGeometry(TILE * 1.0, Math.max(0.08, 0.12 + height * 0.5), TILE * 1.0),
+          new THREE.MeshStandardMaterial({
+            color: 0x3a2818,
+            roughness: 0.85,
+            transparent: true,
+            opacity: 0.8,
+          })
+        );
+        side.position.set(p.x, topY * 0.55, p.z);
+        side.userData = { type: 'bridgeSide' };
+        boardGroup.add(side);
+        // Plank stripes across span (prefer river axis by neighbors)
+        let alongX = true;
+        const nRivX = (riverSet.has(key(x - 1, z)) ? 1 : 0) + (riverSet.has(key(x + 1, z)) ? 1 : 0);
+        const nRivZ = (riverSet.has(key(x, z - 1)) ? 1 : 0) + (riverSet.has(key(x, z + 1)) ? 1 : 0);
+        alongX = nRivZ >= nRivX; // planks cross the river (perpendicular to flow)
+        for (let i = 0; i < 4; i++) {
+          const t = (i - 1.5) / 4;
+          const strip = new THREE.Mesh(
+            alongX
+              ? new THREE.PlaneGeometry(TILE * 0.9, TILE * 0.06)
+              : new THREE.PlaneGeometry(TILE * 0.06, TILE * 0.9),
+            new THREE.MeshBasicMaterial({
+              color: 0x3a2818,
+              transparent: true,
+              opacity: 0.45,
+              depthWrite: false,
+            })
+          );
+          strip.rotation.x = -Math.PI / 2;
+          if (alongX) strip.position.set(p.x, height + 0.19, p.z + t * TILE);
+          else strip.position.set(p.x + t * TILE, height + 0.19, p.z);
+          boardGroup.add(strip);
+        }
+      }
+
+      // Soft high-tile rim (land crest only)
+      if (!isObs && !isRiv && !wet && tHigh >= 0.7) {
         const rim = new THREE.Mesh(
           new THREE.PlaneGeometry(TILE * 0.92, TILE * 0.92),
           new THREE.MeshBasicMaterial({
@@ -712,15 +1272,61 @@ function buildBoard() {
       }
 
       if (isObs) {
-        const rock = new THREE.Mesh(
-          new THREE.DodecahedronGeometry(0.35, 0),
-          new THREE.MeshStandardMaterial({ color: 0x6a7388, roughness: 0.9 })
-        );
-        rock.position.set(p.x, height + 0.45, p.z);
+        // Richer layered rock prop
+        const rockMatA = new THREE.MeshStandardMaterial({ color: 0x5c6574, roughness: 0.9, metalness: 0.05 });
+        const rockMatB = new THREE.MeshStandardMaterial({ color: 0x7a8494, roughness: 0.88, metalness: 0.08 });
+        const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.32, 0), rockMatA);
+        rock.position.set(p.x, height + 0.42, p.z);
+        rock.rotation.set(uJitter * 1.7, uJitter * 2.1, 0.3);
         rock.castShadow = true;
-        boardGroup.add(rock);
+        const rock2 = new THREE.Mesh(new THREE.DodecahedronGeometry(0.2, 0), rockMatB);
+        rock2.position.set(p.x + 0.12, height + 0.34, p.z - 0.08);
+        rock2.castShadow = true;
+        boardGroup.add(rock, rock2);
       }
-      tiles.push({ x, z, mesh, obstacle: isObs, height });
+
+      tiles.push({
+        x, z, mesh,
+        obstacle: isObs,
+        river: isRiv,
+        bridge: isBr,
+        height,
+      });
+    }
+  }
+
+  // Foam edge: ortho water ↔ land (non-water)
+  const foamMat = new THREE.MeshBasicMaterial({
+    color: 0xc8e8f0,
+    transparent: true,
+    opacity: 0.42,
+    depthWrite: false,
+  });
+  for (let z = 0; z < GRID; z++) {
+    for (let x = 0; x < GRID; x++) {
+      if (!isOpenWaterKey(key(x, z))) continue;
+      const hW = tileHeight(x, z);
+      const pW = worldPos(x, z);
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = x + dx, nz = z + dz;
+        if (!inBounds(nx, nz)) continue;
+        const nk = key(nx, nz);
+        if (isOpenWaterKey(nk)) continue;
+        // land, bridge, or rock bank
+        const foamW = TILE * 0.06;
+        const geo = dx !== 0
+          ? new THREE.PlaneGeometry(foamW, TILE * 0.9)
+          : new THREE.PlaneGeometry(TILE * 0.9, foamW);
+        const foam = new THREE.Mesh(geo, foamMat);
+        foam.rotation.x = -Math.PI / 2;
+        foam.position.set(
+          pW.x + dx * (TILE * 0.47),
+          hW + 0.195,
+          pW.z + dz * (TILE * 0.47)
+        );
+        foam.userData = { type: 'foam' };
+        boardGroup.add(foam);
+      }
     }
   }
 
@@ -1237,9 +1843,13 @@ function bfsReachable(sx, sz, movePts, ignoreUnit = null) {
       if (!inBounds(nx, nz)) continue;
       const t = tileAt(nx, nz);
       if (!t || t.obstacle) continue;
+      // Water blocks move; bridge is walkable
+      if (t.river && !t.bridge) continue;
       // Ortho fault edges block; diagonal blocked if either ortho leg from current is a cliff (no corner-cut)
       if (dx !== 0 && dz !== 0) {
         if (isCliffEdge(x, z, nx, z) || isCliffEdge(x, z, x, nz)) continue;
+        // No diagonal corner-cut across open water (keeps 1-wide river a real cut under 8-dir move)
+        if (isWater(nx, z) || isWater(x, nz)) continue;
       } else if (isCliffEdge(x, z, nx, nz)) {
         continue;
       }
@@ -1395,6 +2005,10 @@ function animate() {
   controls.update();
   faceBarsToCamera();
   repositionAttackPreviews();
+  if (waterMats.length) {
+    const pulse = 0.08 + 0.04 * Math.sin(performance.now() / 900);
+    for (const m of waterMats) m.emissiveIntensity = pulse;
+  }
   renderer.render(scene, camera);
 }
 
@@ -1884,7 +2498,55 @@ function checkWinLoseEarly() {
   return false;
 }
 
+/** Full walkable flood (ignore units) — for river-region separation. */
+function walkableRegion(sx, sz) {
+  const seen = new Set();
+  const q = [[sx, sz]];
+  seen.add(key(sx, sz));
+  while (q.length) {
+    const [x, z] = q.shift();
+    for (const [dx, dz] of DIRS8) {
+      const nx = x + dx, nz = z + dz;
+      if (!inBounds(nx, nz)) continue;
+      const nk = key(nx, nz);
+      if (seen.has(nk)) continue;
+      const t = tileAt(nx, nz);
+      if (!t || t.obstacle) continue;
+      if (t.river && !t.bridge) continue;
+      if (dx !== 0 && dz !== 0) {
+        if (isCliffEdge(x, z, nx, z) || isCliffEdge(x, z, x, nz)) continue;
+        if (isWater(nx, z) || isWater(x, nz)) continue;
+      } else if (isCliffEdge(x, z, nx, nz)) {
+        continue;
+      }
+      seen.add(nk);
+      q.push([nx, nz]);
+    }
+  }
+  return seen;
+}
+
+function isSeparatedByRiver(ux, uz, gx, gz) {
+  if (!inBounds(gx, gz)) return false;
+  const region = walkableRegion(ux, uz);
+  return !region.has(key(gx, gz));
+}
+
+function nearestBridgeTile(ux, uz) {
+  let best = null, bestD = Infinity;
+  for (const t of tiles) {
+    if (!t.bridge) continue;
+    const d = chebyshev(ux, uz, t.x, t.z);
+    if (d < bestD) {
+      bestD = d;
+      best = { x: t.x, z: t.z };
+    }
+  }
+  return best;
+}
+
 function aiAct(unit) {
+
   // Real act start — committed contact snapshot OK here
   updateIntelFromContact();
   const fac = unit.faction;
@@ -1910,6 +2572,15 @@ function aiAct(unit) {
     if (!factionScoutGoal[fac]) factionScoutGoal[fac] = rollFactionScoutGoal(fac);
     goalX = factionScoutGoal[fac].x;
     goalZ = factionScoutGoal[fac].z;
+  }
+
+  // River separation → funnel to closest bridge (to unit)
+  if (isSeparatedByRiver(unit.x, unit.z, goalX, goalZ)) {
+    const br = nearestBridgeTile(unit.x, unit.z);
+    if (br) {
+      goalX = br.x;
+      goalZ = br.z;
+    }
   }
 
   const mem = factionMemory[fac] || new Map();
