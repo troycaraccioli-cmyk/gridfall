@@ -90,7 +90,7 @@ function initThree() {
   scene.fog = new THREE.Fog(0x0b1220, 28, 70);
 
   camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
-  camera.position.set(18, 26, 22);
+  camera.position.set(-20, 24, -20); // SW — cyan army closest to camera
 
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -1011,14 +1011,79 @@ function screenToNDC(e) {
   pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 }
 
-// Tap vs orbit/pan: hold OrbitControls until a drag is confirmed so single-finger taps select units.
+
+// Tap vs orbit/pan. Track pointers globally so two-finger pan never leaves a stale id
+// that would make later single taps look like multitouch (and skip selection).
 const activePointers = new Set();
 let tapGesture = null; // { id, x, y, t, dragged }
+
+function resetPointerState() {
+  activePointers.clear();
+  tapGesture = null;
+  if (controls) {
+    controls.enableRotate = true;
+    controls.enablePan = true;
+  }
+}
+
+function onPointerTrackEnd(e) {
+  activePointers.delete(e.pointerId);
+  if (tapGesture && e.pointerId === tapGesture.id) {
+    const gest = tapGesture;
+    tapGesture = null;
+    const dt = Date.now() - gest.t;
+    const dist = Math.hypot(e.clientX - gest.x, e.clientY - gest.y);
+    // Only select when this was a true single-finger tap (no drag, no other fingers)
+    if (
+      gameActive &&
+      phase === 'player' &&
+      !gest.dragged &&
+      dist <= 24 &&
+      dt < 800 &&
+      activePointers.size === 0
+    ) {
+      handleTap(e);
+    }
+  }
+  if (activePointers.size === 0) {
+    if (controls) {
+      controls.enableRotate = true;
+      controls.enablePan = true;
+    }
+    tapGesture = null;
+  }
+}
+
+function onPointerTrackMove(e) {
+  if (!tapGesture || e.pointerId !== tapGesture.id) return;
+  if (activePointers.size > 1) {
+    // Became a multitouch gesture — abandon tap
+    tapGesture = null;
+    controls.enableRotate = true;
+    controls.enablePan = true;
+    return;
+  }
+  const dist = Math.hypot(e.clientX - tapGesture.x, e.clientY - tapGesture.y);
+  if (dist > 24) {
+    tapGesture.dragged = true;
+    controls.enableRotate = true; // one-finger orbit after clear drag
+  }
+}
+
+// Bind once (module scope). pointerup/cancel/move on window catch OrbitControls capture quirks.
+if (!window.__gridfallPtrBound) {
+  window.__gridfallPtrBound = true;
+  window.addEventListener('pointerup', onPointerTrackEnd, true);
+  window.addEventListener('pointercancel', onPointerTrackEnd, true);
+  window.addEventListener('pointermove', onPointerTrackMove, true);
+  // If the tab/gesture is interrupted, recover controls
+  window.addEventListener('blur', resetPointerState);
+}
 
 function onPointerDown(e) {
   activePointers.add(e.pointerId);
 
-  // Two+ fingers → pan/zoom; cancel any pending tap and restore controls
+  // Two+ fingers → pan/zoom; never treat as unit tap
   if (activePointers.size > 1) {
     tapGesture = null;
     controls.enableRotate = true;
@@ -1029,47 +1094,12 @@ function onPointerDown(e) {
   if (!gameActive || phase !== 'player') return;
   if (e.button !== undefined && e.button !== 0) return;
 
-  // Single finger/stylus/mouse: freeze orbit until we know it's a drag
+  // Single pointer: freeze orbit/pan until drag or second finger
   tapGesture = { id: e.pointerId, x: e.clientX, y: e.clientY, t: Date.now(), dragged: false };
   controls.enableRotate = false;
   controls.enablePan = false;
-
-  const move = (ev) => {
-    if (!tapGesture || ev.pointerId !== tapGesture.id) return;
-    const dist = Math.hypot(ev.clientX - tapGesture.x, ev.clientY - tapGesture.y);
-    // Touch jitter is larger on iPad — require a clear drag before orbiting
-    if (dist > 22) {
-      tapGesture.dragged = true;
-      controls.enableRotate = true;
-      // pan stays off for one-finger; two-finger path re-enables it
-    }
-  };
-  const up = (ev) => {
-    window.removeEventListener('pointerup', up);
-    window.removeEventListener('pointercancel', up);
-    window.removeEventListener('pointermove', move);
-    activePointers.delete(ev.pointerId);
-
-    const gest = tapGesture;
-    if (gest && ev.pointerId === gest.id) {
-      tapGesture = null;
-      const dt = Date.now() - gest.t;
-      const dist = Math.hypot(ev.clientX - gest.x, ev.clientY - gest.y);
-      if (!gest.dragged && dist <= 22 && dt < 750 && activePointers.size === 0) {
-        handleTap(ev);
-      }
-    }
-
-    if (activePointers.size === 0) {
-      controls.enableRotate = true;
-      controls.enablePan = true;
-      tapGesture = null;
-    }
-  };
-  window.addEventListener('pointerup', up);
-  window.addEventListener('pointercancel', up);
-  window.addEventListener('pointermove', move);
 }
+
 
 function handleTap(e) {
   screenToNDC(e);
@@ -1344,6 +1374,7 @@ function doAttackAI(attacker, defender) {
 }
 
 function startGame() {
+  resetPointerState();
   showOverlay(null);
   setHudVisible(true);
   buildBoard();
@@ -1361,7 +1392,8 @@ function startGame() {
   updateHudCounts();
   updateUnitInfo();
   controls.target.set(0, 0.3, 0);
-  camera.position.set(18, 26, 22);
+  camera.position.set(-20, 24, -20); // cyan (SW) closest
+  controls.update(); // SW — cyan army closest to camera
   controls.update();
   toast('Battle start — tap a cyan unit', 1800);
 }
