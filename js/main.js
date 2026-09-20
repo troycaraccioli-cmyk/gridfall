@@ -15,6 +15,16 @@ const UNIT_DEFS = {
   bastion:  { name: 'Bastion',  move: 2, hp: 16, atk: 5, range: 1, minRange: 1, colorPlayer: 0x8ab4ff, colorEnemy: 0xff5577, shape: 'carriage' },
 };
 
+const ARMY_COLORS = {
+  player:  { main: 0x3ad7ff, base: 0x145a70, name: 'Cyan' },
+  ember:   { main: 0xff7a3a, base: 0x703018, name: 'Ember' },
+  ash:     { main: 0xc084fc, base: 0x4a1868, name: 'Ash' },
+  cinder:  { main: 0xff5577, base: 0x701828, name: 'Cinder' },
+};
+
+function isPlayer(u) { return u.faction === 'player'; }
+function isEnemy(u) { return u.faction !== 'player'; }
+
 const $ = (id) => document.getElementById(id);
 
 const ui = {
@@ -156,10 +166,14 @@ function buildBoard() {
 
   // 4× prior obstacle count (5 → 20), keep spawn corners + crystal clear
   const obstacles = new Set();
-  const crystalX = Math.floor(GRID / 2);
-  const crystalZ = Math.floor(GRID / 2);
+    // Even grids have no single center cell; use (N/2-1,N/2-1) and mark that tile gold.
+  const crystalX = Math.floor(GRID / 2) - 1;
+  const crystalZ = Math.floor(GRID / 2) - 1;
   const banned = new Set();
+  // Keep all four army corners + crystal clear of rocks
   for (let z = 0; z < 5; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
+  for (let z = 0; z < 5; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
+  for (let z = GRID - 5; z < GRID; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
   for (let z = GRID - 5; z < GRID; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
   banned.add(key(crystalX, crystalZ));
   const candidates = [];
@@ -182,12 +196,15 @@ function buildBoard() {
   for (let z = 0; z < GRID; z++) {
     for (let x = 0; x < GRID; x++) {
       const isObs = obstacles.has(key(x, z));
+      const isCrystalTile = x === crystalX && z === crystalZ;
       const checker = (x + z) % 2 === 0;
       const geo = new THREE.BoxGeometry(TILE * 0.92, 0.18, TILE * 0.92);
       const mat = new THREE.MeshStandardMaterial({
-        color: isObs ? 0x3a4558 : (checker ? 0x1e3a5f : 0x16304f),
+        color: isCrystalTile ? 0xc9a227 : (isObs ? 0x3a4558 : (checker ? 0x1e3a5f : 0x16304f)),
+        emissive: isCrystalTile ? 0x664400 : 0x000000,
+        emissiveIntensity: isCrystalTile ? 0.35 : 0,
         roughness: 0.7,
-        metalness: 0.15,
+        metalness: isCrystalTile ? 0.35 : 0.15,
       });
       const mesh = new THREE.Mesh(geo, mat);
       const p = worldPos(x, z);
@@ -226,11 +243,28 @@ function buildBoard() {
       roughness: 0.25,
     })
   );
+  // Sit crystal exactly on the center tile's world position
   crystal.position.set(cp.x, 0.55, cp.z);
   crystal.castShadow = true;
   crystal.userData = { type: 'crystal', x: crystalX, z: crystalZ };
   scene.add(crystal);
   crystalMesh = crystal;
+
+  // Gold pad under crystal so the capture tile is unmistakable
+  const pad = new THREE.Mesh(
+    new THREE.CylinderGeometry(TILE * 0.42, TILE * 0.42, 0.06, 24),
+    new THREE.MeshStandardMaterial({ color: 0xffd266, emissive: 0xaa7700, emissiveIntensity: 0.4, metalness: 0.5, roughness: 0.35 })
+  );
+  pad.position.set(cp.x, 0.16, cp.z);
+  pad.receiveShadow = true;
+  boardGroup.add(pad);
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(TILE * 0.38, TILE * 0.48, 32),
+    new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.85, side: THREE.DoubleSide })
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.set(cp.x, 0.2, cp.z);
+  boardGroup.add(ring);
 
   // Soft glow ring
   const ring = new THREE.Mesh(
@@ -567,7 +601,8 @@ function makeArmoredCarriage(color) {
 }
 
 function makeUnitMesh(def, faction) {
-  const color = faction === 'player' ? def.colorPlayer : def.colorEnemy;
+  const army = ARMY_COLORS[faction] || ARMY_COLORS.ember;
+  const color = army.main;
   let mesh;
   let hpY = 1.05;
   if (def.shape === 'archer' || def.shape === 'cone') {
@@ -594,7 +629,7 @@ function makeUnitMesh(def, faction) {
 
   const base = new THREE.Mesh(
     new THREE.CylinderGeometry(0.38, 0.4, 0.08, 16),
-    new THREE.MeshStandardMaterial({ color: faction === 'player' ? 0x145a70 : 0x703018, roughness: 0.8 })
+    new THREE.MeshStandardMaterial({ color: army.base, roughness: 0.8 })
   );
   base.position.y = 0.12;
   base.castShadow = true;
@@ -632,30 +667,24 @@ function spawnUnits() {
   while (unitsGroup.children.length) unitsGroup.remove(unitsGroup.children[0]);
   units = [];
 
-  // 2× armies (5 → 10 per side) on the enlarged 16×16 board
+  // Four armies — one per corner (you = Cyan / SW). Each: 1 carriage, 2 knights, 2 archers.
   const E = GRID - 1;
+  const armyPattern = (faction, ox, oz, flipX, flipZ) => {
+    const fx = (x) => (flipX ? ox - x : ox + x);
+    const fz = (z) => (flipZ ? oz - z : oz + z);
+    return [
+      { type: 'bastion', faction, x: fx(0), z: fz(1) },
+      { type: 'infantry', faction, x: fx(1), z: fz(0) },
+      { type: 'infantry', faction, x: fx(0), z: fz(2) },
+      { type: 'archer', faction, x: fx(2), z: fz(0) },
+      { type: 'archer', faction, x: fx(1), z: fz(1) },
+    ];
+  };
   const layout = [
-    { type: 'bastion', faction: 'player', x: 0, z: 1 },
-    { type: 'bastion', faction: 'player', x: 1, z: 0 },
-    { type: 'infantry', faction: 'player', x: 0, z: 2 },
-    { type: 'infantry', faction: 'player', x: 2, z: 0 },
-    { type: 'infantry', faction: 'player', x: 0, z: 3 },
-    { type: 'infantry', faction: 'player', x: 3, z: 0 },
-    { type: 'archer', faction: 'player', x: 1, z: 1 },
-    { type: 'archer', faction: 'player', x: 2, z: 1 },
-    { type: 'archer', faction: 'player', x: 1, z: 2 },
-    { type: 'archer', faction: 'player', x: 2, z: 2 },
-
-    { type: 'bastion', faction: 'enemy', x: E, z: E - 1 },
-    { type: 'bastion', faction: 'enemy', x: E - 1, z: E },
-    { type: 'infantry', faction: 'enemy', x: E, z: E - 2 },
-    { type: 'infantry', faction: 'enemy', x: E - 2, z: E },
-    { type: 'infantry', faction: 'enemy', x: E, z: E - 3 },
-    { type: 'infantry', faction: 'enemy', x: E - 3, z: E },
-    { type: 'archer', faction: 'enemy', x: E - 1, z: E - 1 },
-    { type: 'archer', faction: 'enemy', x: E - 2, z: E - 1 },
-    { type: 'archer', faction: 'enemy', x: E - 1, z: E - 2 },
-    { type: 'archer', faction: 'enemy', x: E - 2, z: E - 2 },
+    ...armyPattern('player', 0, 0, false, false),       // SW
+    ...armyPattern('ember', E, 0, true, false),         // SE
+    ...armyPattern('ash', 0, E, false, true),           // NW
+    ...armyPattern('cinder', E, E, true, true),         // NE
   ];
 
   for (const L of layout) {
@@ -683,6 +712,7 @@ function spawnUnits() {
     updateHpBar(u);
   }
 }
+
 
 function unitAt(x, z) {
   return units.find((u) => u.hp > 0 && u.x === x && u.z === z);
@@ -798,7 +828,7 @@ function updateUnitInfo() {
 
 function updateHudCounts() {
   const pc = units.filter((u) => u.faction === 'player' && u.hp > 0).length;
-  const ec = units.filter((u) => u.faction === 'enemy' && u.hp > 0).length;
+  const ec = units.filter((u) => u.faction !== 'player' && u.hp > 0).length;
   ui.playerCount.textContent = String(pc);
   ui.enemyCount.textContent = String(ec);
   ui.turnNum.textContent = String(turn);
@@ -984,10 +1014,9 @@ function checkCrystalCapture(unit) {
 }
 
 function checkWinLose() {
+  // Victory is ONLY by occupying the crystal tile (see checkCrystalCapture).
   const pc = units.filter((u) => u.faction === 'player' && u.hp > 0).length;
-  const ec = units.filter((u) => u.faction === 'enemy' && u.hp > 0).length;
-  if (ec === 0) endGame(true, 'All Ember forces defeated.');
-  else if (pc === 0) endGame(false, 'Your army has fallen.');
+  if (pc === 0) endGame(false, 'Your army has fallen.');
 }
 
 function endGame(win, msg) {
@@ -1017,11 +1046,11 @@ async function endPlayerTurn() {
   clearHighlights();
   updateUnitInfo();
   phase = 'ai';
-  ui.phase.textContent = 'Ember turn…';
+  ui.phase.textContent = 'Enemy turn…';
   ui.phase.classList.remove('player');
   ui.phase.classList.add('enemy');
   ui.btnEnd.disabled = true;
-  toast('Ember AI moving…', 1200);
+  toast('Enemy armies moving…', 1200);
   await sleep(500);
   await runAI();
   if (phase === 'ended') return;
@@ -1042,8 +1071,8 @@ function sleep(ms) {
 }
 
 async function runAI() {
-  resetUnitActions('enemy');
-  const enemies = units.filter((u) => u.faction === 'enemy' && u.hp > 0);
+  ['ember','ash','cinder'].forEach(resetUnitActions);
+  const enemies = units.filter((u) => u.faction !== 'player' && u.hp > 0);
   // Sort: prefer bastions last, archers that can shoot first-ish
   enemies.sort((a, b) => a.def.range - b.def.range);
 
@@ -1060,8 +1089,8 @@ async function runAI() {
     const cx = crystalMesh.userData.x;
     const cz = crystalMesh.userData.z;
     for (const u of units) {
-      if (u.faction === 'enemy' && u.hp > 0 && u.x === cx && u.z === cz) {
-        endGame(false, 'Ember captured the crystal.');
+      if (u.faction !== 'player' && u.hp > 0 && u.x === cx && u.z === cz) {
+        endGame(false, `${ARMY_COLORS[u.faction]?.name || 'Enemy'} captured the crystal.`);
         return;
       }
     }
@@ -1070,8 +1099,6 @@ async function runAI() {
 
 function checkWinLoseEarly() {
   const pc = units.filter((u) => u.faction === 'player' && u.hp > 0).length;
-  const ec = units.filter((u) => u.faction === 'enemy' && u.hp > 0).length;
-  if (ec === 0) { endGame(true, 'All Ember forces defeated.'); return true; }
   if (pc === 0) { endGame(false, 'Your army has fallen.'); return true; }
   return false;
 }
@@ -1084,14 +1111,17 @@ function aiAct(unit) {
   }).filter(Boolean);
 
   if (targets.length) {
-    targets.sort((a, b) => a.hp - b.hp);
-    doAttackAI(unit, targets[0]);
+    const players = targets.filter((t) => t.faction === 'player');
+    const pool = players.length ? players : targets;
+    pool.sort((a, b) => a.hp - b.hp);
+    doAttackAI(unit, pool[0]);
     return;
   }
 
-  // Move toward nearest player or crystal
+  // Move toward nearest player, else crystal
   const players = units.filter((u) => u.faction === 'player' && u.hp > 0);
-  let goalX = 4, goalZ = 4;
+  let goalX = crystalMesh ? crystalMesh.userData.x : Math.floor(GRID / 2) - 1;
+  let goalZ = crystalMesh ? crystalMesh.userData.z : Math.floor(GRID / 2) - 1;
   if (players.length) {
     let best = null, bestD = Infinity;
     for (const p of players) {
@@ -1133,8 +1163,10 @@ function aiAct(unit) {
       return unitAt(x, z);
     }).filter(Boolean);
     if (targets.length) {
-      targets.sort((a, b) => a.hp - b.hp);
-      doAttackAI(unit, targets[0]);
+      const players2 = targets.filter((t) => t.faction === 'player');
+      const pool2 = players2.length ? players2 : targets;
+      pool2.sort((a, b) => a.hp - b.hp);
+      doAttackAI(unit, pool2[0]);
     }
   }
 }
@@ -1146,7 +1178,8 @@ function doAttackAI(attacker, defender) {
   attacker.moved = true;
   updateHpBar(defender);
   pulseMesh(defender.mesh);
-  toast(`Ember ${attacker.def.name} hits for ${dmg}`, 900);
+  const armyName = (ARMY_COLORS[attacker.faction] || {}).name || 'Enemy';
+  toast(`${armyName} ${attacker.def.name} hits for ${dmg}`, 900);
   if (defender.hp <= 0) {
     defender.hp = 0;
     unitsGroup.remove(defender.mesh);
