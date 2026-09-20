@@ -56,6 +56,9 @@ let turn = 1;
 let phase = 'player'; // player | ai | ended
 let gameActive = false;
 let toastTimer = null;
+let unitInfoHitTimer = null;
+/** Defender → active float element (replace, don't stack). */
+const activeDmgFloats = new Map();
 /** Per-faction set of unit ids that faction has discovered (Chebyshev ≤ 1 contact). */
 let factionIntel = { player: new Set(), ember: new Set(), ash: new Set(), cinder: new Set() };
 /** Last-known contact memory (no live tracking for movement goals). */
@@ -1113,10 +1116,12 @@ function refreshSelectionVisuals() {
 }
 
 function updateUnitInfo() {
+  // Skip while hit-HUD flash owns the strip (restore timer will call us again).
+  if (unitInfoHitTimer) return;
   if (!selected || selected.hp <= 0) {
     ui.unitInfo.innerHTML = phase === 'player'
       ? 'Tap a <strong>cyan</strong> unit to select, then tap a highlighted tile to move or attack.'
-      : 'Ember AI is thinking…';
+      : 'Rival armies are moving…';
     return;
   }
   const canMove = !selected.moved ? `Move ${selected.def.move}` : 'Moved';
@@ -1136,6 +1141,8 @@ function selectUnit(unit) {
   if (phase !== 'player' || !gameActive) return;
   if (!unit || unit.faction !== 'player' || unit.hp <= 0) return;
   selected = unit;
+  clearTimeout(unitInfoHitTimer);
+  unitInfoHitTimer = null;
   refreshSelectionVisuals();
   updateUnitInfo();
 }
@@ -1301,6 +1308,88 @@ function handleTap(e) {
   }
 }
 
+
+/** Map attackMultiplier notes → compact chip descriptors (max 2). */
+function bonusChips(notes) {
+  const chips = [];
+  for (const n of notes) {
+    if (n.includes('high')) chips.push({ cls: 'high', label: '▲ +2%', hud: '▲ high' });
+    else if (n.includes('formed')) chips.push({ cls: 'form', label: '◆◆ +8%', hud: '◆◆ form' });
+    else if (n.includes('paired')) chips.push({ cls: 'pair', label: '◆ +4%', hud: '◆ pair' });
+  }
+  return chips.slice(0, 2);
+}
+
+function worldToScreen(wx, wy, wz) {
+  const v = new THREE.Vector3(wx, wy, wz);
+  v.project(camera);
+  return {
+    x: (v.x * 0.5 + 0.5) * window.innerWidth,
+    y: (-v.y * 0.5 + 0.5) * window.innerHeight,
+  };
+}
+
+/** Primary tell: damage float over defender (one per defender). */
+function showDamageFloat(defender, dmg, notes) {
+  const layer = $('dmg-floats');
+  if (!layer || !defender || !defender.mesh) return;
+  const prev = activeDmgFloats.get(defender);
+  if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+  activeDmgFloats.delete(defender);
+
+  const el = document.createElement('div');
+  el.className = 'dmg-float';
+  const num = document.createElement('div');
+  num.className = 'dmg-num';
+  num.textContent = String(dmg);
+  el.appendChild(num);
+  const chips = bonusChips(notes);
+  if (chips.length) {
+    const row = document.createElement('div');
+    row.className = 'dmg-chips';
+    for (const c of chips) {
+      const span = document.createElement('span');
+      span.className = `dmg-chip ${c.cls}`;
+      span.textContent = c.label;
+      row.appendChild(span);
+    }
+    el.appendChild(row);
+  }
+  const pos = defender.mesh.position;
+  const scr = worldToScreen(pos.x, pos.y + 0.85, pos.z);
+  el.style.left = `${Math.round(scr.x)}px`;
+  el.style.top = `${Math.round(scr.y)}px`;
+  layer.appendChild(el);
+  activeDmgFloats.set(defender, el);
+  setTimeout(() => {
+    if (el.parentNode) el.parentNode.removeChild(el);
+    if (activeDmgFloats.get(defender) === el) activeDmgFloats.delete(defender);
+  }, 1050);
+}
+
+/** Player-only tertiary HUD line; restores selection copy after ~1.2s. */
+function showHitHud(dmg, notes) {
+  clearTimeout(unitInfoHitTimer);
+  const chips = bonusChips(notes);
+  const parts = [`Hit ${dmg}`, ...chips.map((c) => c.hud)];
+  ui.unitInfo.textContent = parts.join(' · ');
+  unitInfoHitTimer = setTimeout(() => {
+    unitInfoHitTimer = null;
+    updateUnitInfo();
+  }, 1200);
+}
+
+function flashCombat(attacker, defender, notes) {
+  pulseMesh(defender.mesh);
+  if (!notes.length || !attacker || !attacker.mesh) return;
+  let intensity = 0.75;
+  let ms = 180;
+  const joined = notes.join(' ');
+  if (joined.includes('formed')) { intensity = 1.15; ms = 200; }
+  else if (joined.includes('paired')) { intensity = 0.95; ms = 180; }
+  pulseMesh(attacker.mesh, { color: 0x3ad7ff, intensity, ms });
+}
+
 function doMove(unit, x, z) {
   unit.x = x;
   unit.z = z;
@@ -1322,9 +1411,8 @@ function doAttack(attacker, defender) {
   attacker.attacked = true;
   attacker.moved = true;
   updateHpBar(defender);
-  const bonus = notes.length ? ` (${notes.join(', ')})` : '';
-  toast(`${attacker.def.name} hits for ${dmg}${bonus}`);
-  pulseMesh(defender.mesh);
+  flashCombat(attacker, defender, notes);
+  showDamageFloat(defender, dmg, notes);
   if (defender.hp <= 0) {
     defender.hp = 0;
     unitsGroup.remove(defender.mesh);
@@ -1332,18 +1420,36 @@ function doAttack(attacker, defender) {
   }
   updateIntelFromContact();
   refreshSelectionVisuals();
-  updateUnitInfo();
   updateHudCounts();
+  showHitHud(dmg, notes);
   checkWinLose();
 }
 
-function pulseMesh(mesh) {
+function pulseMesh(mesh, opts = {}) {
+  if (!mesh) return;
+  const intensity = opts.intensity != null ? opts.intensity : 0.9;
+  const ms = opts.ms != null ? opts.ms : 200;
+  const tint = opts.color != null ? new THREE.Color(opts.color) : null;
   const mats = [];
   mesh.traverse((c) => {
-    if (c.isMesh && c.material && c.material.emissive) mats.push(c.material);
+    if (c.isMesh && c.material && c.material.emissive) {
+      mats.push({
+        m: c.material,
+        prevI: c.material.emissiveIntensity,
+        prevC: c.material.emissive.clone(),
+      });
+    }
   });
-  mats.forEach((m) => { m.emissiveIntensity = 0.9; });
-  setTimeout(() => mats.forEach((m) => { m.emissiveIntensity = 0.18; }), 200);
+  mats.forEach(({ m }) => {
+    if (tint) m.emissive.copy(tint);
+    m.emissiveIntensity = intensity;
+  });
+  setTimeout(() => {
+    mats.forEach(({ m, prevI, prevC }) => {
+      m.emissive.copy(prevC);
+      m.emissiveIntensity = prevI;
+    });
+  }, ms);
 }
 
 function checkWinLose() {
@@ -1512,10 +1618,8 @@ function doAttackAI(attacker, defender) {
   attacker.attacked = true;
   attacker.moved = true;
   updateHpBar(defender);
-  pulseMesh(defender.mesh);
-  const armyName = (ARMY_COLORS[attacker.faction] || {}).name || 'Enemy';
-  const bonus = notes.length ? ` (${notes.join(', ')})` : '';
-  toast(`${armyName} ${attacker.def.name} hits for ${dmg}${bonus}`, 900);
+  flashCombat(attacker, defender, notes);
+  showDamageFloat(defender, dmg, notes);
   if (defender.hp <= 0) {
     defender.hp = 0;
     unitsGroup.remove(defender.mesh);
