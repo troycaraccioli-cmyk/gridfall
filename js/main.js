@@ -27,7 +27,7 @@ function isEnemy(u) { return u.faction !== 'player'; }
 
 const $ = (id) => document.getElementById(id);
 
-const BUILD_ID = 'gridfall-v17';
+const BUILD_ID = 'gridfall-v18';
 
 const ui = {
   title: $('title-screen'),
@@ -99,10 +99,13 @@ const SPAWN_CORNERS = {
 const HEIGHT_MIN = 0;
 const HEIGHT_MAX = 0.55; // visual elevation span
 const HEIGHT_SPAN = HEIGHT_MAX - HEIGHT_MIN;
-const HEIGHT_STEP_MAX = HEIGHT_SPAN * 0.05; // walkable / cliff threshold (5% of span)
-const HEIGHT_GEN_STEP_MAX = HEIGHT_SPAN * 0.18; // gen may produce steeper faces so cliffs exist
-const CLIFF_THRESHOLD = HEIGHT_STEP_MAX;
+const HEIGHT_STEP_MAX = HEIGHT_SPAN * 0.05; // max neighbor Δh in gen + non-fault edges (5% of span)
+const CLIFF_MAX_EDGES = 4; // max length of the single fault chain
+const CLIFF_DROP = HEIGHT_SPAN * 0.45; // height separation across fault
 const DIRS8 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+
+/** Canonical ortho cliff-edge keys only (v2: not inferred from raw |Δh|). */
+let cliffEdges = new Set();
 
 function key(x, z) { return `${x},${z}`; }
 
@@ -227,20 +230,68 @@ function heightDelta(ax, az, bx, bz) {
   return tileHeight(ax, az) - tileHeight(bx, bz);
 }
 
-function isCliffEdge(ax, az, bx, bz) {
-  return Math.abs(heightDelta(ax, az, bx, bz)) > CLIFF_THRESHOLD;
+/** Ordered pair key so (A,B) and (B,A) share membership. */
+function edgeKey(ax, az, bx, bz) {
+  if (ax < bx || (ax === bx && az < bz)) return `${ax},${az}|${bx},${bz}`;
+  return `${bx},${bz}|${ax},${az}`;
 }
 
-/** Standing on high lip looking at low tile across a cliff edge. */
+function isCliffEdge(ax, az, bx, bz) {
+  return cliffEdges.has(edgeKey(ax, az, bx, bz));
+}
+
+/** Standing on high lip looking at low tile across a registered cliff edge. */
 function isCliffDown(fromX, fromZ, toX, toZ) {
   return isCliffEdge(fromX, fromZ, toX, toZ)
     && tileHeight(fromX, fromZ) > tileHeight(toX, toZ);
 }
 
-/** Generate heightmap; neighbor delta clamped with HEIGHT_GEN_STEP_MAX (cliffs allowed). */
+/**
+ * Clamp ortho neighbor steps to maxStep.
+ * skipKeys: fault edge keys — never clamp across them.
+ * frozenKeys: cell keys (fault endpoints) — height pinned; only free neighbors move.
+ */
+function clampHeightSteps(h, maxStep, skipKeys = null, frozenKeys = null) {
+  // Post-normalize full-span maps need many passes to settle at 5% step (span compresses).
+  for (let iter = 0; iter < 500; iter++) {
+    let changed = false;
+    for (let z = 0; z < GRID; z++) {
+      for (let x = 0; x < GRID; x++) {
+        for (const [dx, dz] of [[1, 0], [0, 1]]) {
+          const nx = x + dx, nz = z + dz;
+          if (!inBounds(nx, nz)) continue;
+          if (skipKeys && skipKeys.has(edgeKey(x, z, nx, nz))) continue;
+          const aF = frozenKeys && frozenKeys.has(key(x, z));
+          const bF = frozenKeys && frozenKeys.has(key(nx, nz));
+          if (aF && bF) continue; // both pinned (e.g. adjacent lip cells)
+          const d = h[nz][nx] - h[z][x];
+          if (Math.abs(d) <= maxStep + 1e-9) continue;
+          if (aF) {
+            // Pin A; pull B within maxStep of A
+            h[nz][nx] = h[z][x] + (d > 0 ? maxStep : -maxStep);
+            changed = true;
+            continue;
+          }
+          if (bF) {
+            h[z][x] = h[nz][nx] - (d > 0 ? maxStep : -maxStep);
+            changed = true;
+            continue;
+          }
+          const mid = (h[z][x] + h[nz][nx]) / 2;
+          const half = maxStep / 2;
+          if (d > 0) { h[z][x] = mid - half; h[nz][nx] = mid + half; }
+          else { h[z][x] = mid + half; h[nz][nx] = mid - half; }
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+}
+
+/** Generate smooth heightmap; neighbor Δh clamped with HEIGHT_STEP_MAX only (no gen cliffs). */
 function generateHeights(rand) {
   const h = Array.from({ length: GRID }, () => Array(GRID).fill(0));
-  // Seed corners / mid with mild noise then diffuse
   for (let z = 0; z < GRID; z++) {
     for (let x = 0; x < GRID; x++) {
       h[z][x] = HEIGHT_MIN + rand() * (HEIGHT_MAX - HEIGHT_MIN);
@@ -262,27 +313,7 @@ function generateHeights(rand) {
     }
     for (let z = 0; z < GRID; z++) for (let x = 0; x < GRID; x++) h[z][x] = n[z][x];
   }
-  // Enforce gen max step between neighbors (looser than walkable cliff threshold)
-  for (let iter = 0; iter < 40; iter++) {
-    let changed = false;
-    for (let z = 0; z < GRID; z++) {
-      for (let x = 0; x < GRID; x++) {
-        for (const [dx, dz] of [[1,0],[0,1]]) {
-          const nx = x + dx, nz = z + dz;
-          if (!inBounds(nx, nz)) continue;
-          const d = h[nz][nx] - h[z][x];
-          if (Math.abs(d) > HEIGHT_GEN_STEP_MAX) {
-            const mid = (h[z][x] + h[nz][nx]) / 2;
-            const half = HEIGHT_GEN_STEP_MAX / 2;
-            if (d > 0) { h[z][x] = mid - half; h[nz][nx] = mid + half; }
-            else { h[z][x] = mid + half; h[nz][nx] = mid - half; }
-            changed = true;
-          }
-        }
-      }
-    }
-    if (!changed) break;
-  }
+  clampHeightSteps(h, HEIGHT_STEP_MAX);
   // Normalize into [HEIGHT_MIN, HEIGHT_MAX] while preserving relative diffs roughly
   let mn = Infinity, mx = -Infinity;
   for (let z = 0; z < GRID; z++) for (let x = 0; x < GRID; x++) {
@@ -292,28 +323,109 @@ function generateHeights(rand) {
   for (let z = 0; z < GRID; z++) for (let x = 0; x < GRID; x++) {
     h[z][x] = HEIGHT_MIN + ((h[z][x] - mn) / span) * (HEIGHT_MAX - HEIGHT_MIN);
   }
-  // Re-clamp with gen step max after normalize
-  for (let iter = 0; iter < 20; iter++) {
-    let changed = false;
-    for (let z = 0; z < GRID; z++) {
-      for (let x = 0; x < GRID; x++) {
-        for (const [dx, dz] of [[1,0],[0,1]]) {
-          const nx = x + dx, nz = z + dz;
-          if (!inBounds(nx, nz)) continue;
-          const d = h[nz][nx] - h[z][x];
-          if (Math.abs(d) > HEIGHT_GEN_STEP_MAX) {
-            const mid = (h[z][x] + h[nz][nx]) / 2;
-            const half = HEIGHT_GEN_STEP_MAX / 2;
-            if (d > 0) { h[z][x] = mid - half; h[nz][nx] = mid + half; }
-            else { h[z][x] = mid + half; h[nz][nx] = mid - half; }
-            changed = true;
-          }
+  clampHeightSteps(h, HEIGHT_STEP_MAX);
+  return h;
+}
+
+function assertNoGenCliffs(h) {
+  const eps = 1e-6;
+  for (let z = 0; z < GRID; z++) {
+    for (let x = 0; x < GRID; x++) {
+      for (const [dx, dz] of [[1, 0], [0, 1]]) {
+        const nx = x + dx, nz = z + dz;
+        if (!inBounds(nx, nz)) continue;
+        if (Math.abs(h[nz][nx] - h[z][x]) > HEIGHT_STEP_MAX + eps) {
+          console.warn('gen cliff leak', x, z, nx, nz, h[z][x], h[nz][nx]);
+          return false;
         }
       }
     }
-    if (!changed) break;
   }
-  return h;
+  return true;
+}
+
+/**
+ * Inject exactly one contiguous ortho cliff fault (polyline wall).
+ * Clearest ship: straight cardinal wall of N edges; high lip = one side of the cut.
+ * N∈[1,4] prefer 2–4; spawn 5×5 safe; rocks preferred skip; height drop CLIFF_DROP.
+ */
+function injectCliffFault(h, obstacles, banned, rand) {
+  cliffEdges.clear();
+
+  const rollN = () => {
+    const r = rand();
+    if (r < 0.08) return 1; // rare single edge
+    if (r < 0.36) return 2;
+    if (r < 0.68) return 3;
+    return 4;
+  };
+
+  const edgeOk = (ax, az, bx, bz, allowRock) => {
+    if (!inBounds(ax, az) || !inBounds(bx, bz)) return false;
+    if (banned.has(key(ax, az)) || banned.has(key(bx, bz))) return false;
+    if (!allowRock && (obstacles.has(key(ax, az)) || obstacles.has(key(bx, bz)))) return false;
+    return true;
+  };
+
+  /** Straight wall: N parallel ortho edges forming a continuous cut. */
+  const tryStraightWall = (N, allowRock) => {
+    const horizontal = rand() < 0.5; // wall faces N/S (edges between z and z+1)
+    if (horizontal) {
+      const z0 = Math.floor(rand() * (GRID - 1)); // low-side row candidate
+      const x0 = Math.floor(rand() * (GRID - N + 1));
+      const edges = [];
+      for (let i = 0; i < N; i++) {
+        const ax = x0 + i, az = z0, bx = x0 + i, bz = z0 + 1;
+        if (!edgeOk(ax, az, bx, bz, allowRock)) return null;
+        edges.push([ax, az, bx, bz]);
+      }
+      const highIsLowZ = rand() < 0.5;
+      return { edges, highIsA: highIsLowZ }; // A=(x,z0) vs B=(x,z0+1)
+    }
+    const x0 = Math.floor(rand() * (GRID - 1));
+    const z0 = Math.floor(rand() * (GRID - N + 1));
+    const edges = [];
+    for (let i = 0; i < N; i++) {
+      const ax = x0, az = z0 + i, bx = x0 + 1, bz = z0 + i;
+      if (!edgeOk(ax, az, bx, bz, allowRock)) return null;
+      edges.push([ax, az, bx, bz]);
+    }
+    const highIsA = rand() < 0.5;
+    return { edges, highIsA };
+  };
+
+  const applyPlacement = (placement) => {
+    const { edges, highIsA } = placement;
+    const frozen = new Set();
+    for (const [ax, az, bx, bz] of edges) {
+      const hx = highIsA ? ax : bx;
+      const hz = highIsA ? az : bz;
+      const lx = highIsA ? bx : ax;
+      const lz = highIsA ? bz : az;
+      const lo = h[lz][lx];
+      h[hz][hx] = Math.min(HEIGHT_MAX, lo + CLIFF_DROP);
+      cliffEdges.add(edgeKey(ax, az, bx, bz));
+      frozen.add(key(ax, az));
+      frozen.add(key(bx, bz));
+    }
+    // Re-clamp non-fault edges only; pin fault endpoints so CLIFF_DROP is preserved
+    clampHeightSteps(h, HEIGHT_STEP_MAX, cliffEdges, frozen);
+  };
+
+  for (let attempt = 0; attempt < 24; attempt++) {
+    const N = rollN();
+    const allowRock = attempt >= 16; // late attempts may touch rocks
+    const placement = tryStraightWall(N, allowRock);
+    if (placement) {
+      applyPlacement(placement);
+      return;
+    }
+  }
+
+  // Fallback: 2-edge fault in center band x,z ∈ [5..10]
+  cliffEdges.clear();
+  const edges = [[7, 7, 7, 8], [8, 7, 8, 8]];
+  applyPlacement({ edges, highIsA: true });
 }
 
 function countAdjacentAllies(unit) {
@@ -537,7 +649,7 @@ function buildBoard() {
       if (!banned.has(key(x, z))) candidates.push([x, z]);
     }
   }
-  let seed = 42;
+  let seed = (Math.floor(Math.random() * 2147483646) + 1);
   const rand = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
   for (let i = candidates.length - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
@@ -548,6 +660,8 @@ function buildBoard() {
   }
 
   const heights = generateHeights(rand);
+  assertNoGenCliffs(heights);
+  injectCliffFault(heights, obstacles, banned, rand);
 
   for (let z = 0; z < GRID; z++) {
     for (let x = 0; x < GRID; x++) {
@@ -1123,7 +1237,12 @@ function bfsReachable(sx, sz, movePts, ignoreUnit = null) {
       if (!inBounds(nx, nz)) continue;
       const t = tileAt(nx, nz);
       if (!t || t.obstacle) continue;
-      if (isCliffEdge(x, z, nx, nz)) continue; // cliff face blocks pathing both ways
+      // Ortho fault edges block; diagonal blocked if either ortho leg from current is a cliff (no corner-cut)
+      if (dx !== 0 && dz !== 0) {
+        if (isCliffEdge(x, z, nx, z) || isCliffEdge(x, z, x, nz)) continue;
+      } else if (isCliffEdge(x, z, nx, nz)) {
+        continue;
+      }
       const occ = unitAt(nx, nz);
       if (occ && occ !== ignoreUnit) continue;
       const nk = key(nx, nz);
