@@ -72,14 +72,13 @@
         <li><strong>Terrain</strong> — rolling high/low ground (neighbor height shifts stay within 2%). Attacking from higher ground deals +2% damage.</li>
         <li><strong>Formation</strong> — adjacent allies (including diagonals) strengthen attacks: +4% when paired, +8% when 3+ are together.</li>
         <li><strong>Facing</strong> — strike any of the 8 neighboring tiles (front, sides, back, diagonals).</li>
-        <li><strong>Archers</strong> — shoot adjacent by default; range extends up to 3 through empty tiles or over friendlies (not through enemies/rocks).</li>
         <li><strong>Fog of war (AI)</strong> — rival armies do not know your positions until a unit is within 1 tile; they scout separately and will not all pile on at once from the start.</li>
         <li><strong>Map</strong> — 16×16 grid; cyan starts SW; Ember SE, Ash NW, Cinder NE.</li>
       </ol>
       <p class="tagline" style="margin-top:0.75rem;font-size:0.85rem;">After an update: hard-refresh or clear site data so the service worker picks up the new cache. URL <code>?fresh=1</code> forces update toast.</p>
       <div class="units-key">
         <div class="row"><span class="dot inf"></span><div><strong style="color:var(--text)">Infantry</strong> — Move 3, melee attack 1 tile, balanced.</div></div>
-        <div class="row"><span class="dot rng"></span><div><strong style="color:var(--text)">Archer</strong> — Move 2, attack up to 3 tiles (cannot shoot adjacent).</div></div>
+        <div class="row"><span class="dot rng"></span><div><strong style="color:var(--text)">Archer</strong> — Move 2, HP 7, Atk 3. Shoots <strong>2–3</strong> tiles (Chebyshev). Needs clear line of sight; can shoot over friendlies, not through enemies or rocks. <strong>Cannot shoot adjacent.</strong></div></div>
         <div class="row"><span class="dot tnk"></span><div><strong style="color:var(--text)">Bastion</strong> — Move 2, tough armor, melee smash.</div></div>
         <div class="row"><span class="dot enemy"></span><div><strong style="color:var(--text)">Rival armies</strong> — Ember (orange), Ash (purple), Cinder (rose) — 10 units each (1 Bastion, 5 Infantry, 4 Archers), one per corner.</div></div>
       </div>
