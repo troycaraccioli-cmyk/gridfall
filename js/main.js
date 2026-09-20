@@ -27,7 +27,7 @@ function isEnemy(u) { return u.faction !== 'player'; }
 
 const $ = (id) => document.getElementById(id);
 
-const BUILD_ID = 'gridfall-v15';
+const BUILD_ID = 'gridfall-v16';
 
 const ui = {
   title: $('title-screen'),
@@ -63,6 +63,8 @@ let toastTimer = null;
 let unitInfoHitTimer = null;
 /** Defender → active float element (replace, don't stack). */
 const activeDmgFloats = new Map();
+/** Enemy unit → static attack-preview chip row (selection). */
+const activeAttackPreviews = new Map();
 /** Per-faction set of unit ids that faction has discovered (Chebyshev ≤ 1 contact). */
 let factionIntel = { player: new Set(), ember: new Set(), ash: new Set(), cinder: new Set() };
 /** Last-known contact memory (no live tracking for movement goals). */
@@ -1083,6 +1085,7 @@ function clearHighlights() {
   }
   reachable.clear();
   attackable.clear();
+  clearAttackPreviews();
 }
 
 function addHighlight(x, z, color, opacity = 0.45) {
@@ -1115,6 +1118,7 @@ function refreshSelectionVisuals() {
       const [x, z] = k.split(',').map(Number);
       addHighlight(x, z, 0xff5d7a, 0.5);
     }
+    showAttackPreviews(selected);
   }
 
   // Selected tile ring
@@ -1168,6 +1172,7 @@ function animate() {
   requestAnimationFrame(animate);
   controls.update();
   faceBarsToCamera();
+  repositionAttackPreviews();
   renderer.render(scene, camera);
 }
 
@@ -1335,6 +1340,58 @@ function worldToScreen(wx, wy, wz) {
   };
 }
 
+
+function clearAttackPreviews() {
+  for (const el of activeAttackPreviews.values()) {
+    if (el.parentNode) el.parentNode.removeChild(el);
+  }
+  activeAttackPreviews.clear();
+}
+
+/** Static bonus chips over attackable enemies while a cyan unit can still attack. */
+function showAttackPreviews(attacker) {
+  clearAttackPreviews();
+  if (!attacker || attacker.hp <= 0 || attacker.attacked || phase !== 'player') return;
+  const layer = $('dmg-floats');
+  if (!layer) return;
+  for (const k of attackable) {
+    const [x, z] = k.split(',').map(Number);
+    const enemy = unitAt(x, z);
+    if (!enemy || enemy.hp <= 0 || !enemy.mesh) continue;
+    const { notes } = attackMultiplier(attacker, enemy);
+    const chips = bonusChips(notes);
+    if (!chips.length) continue;
+    const el = document.createElement('div');
+    el.className = 'dmg-float dmg-float-preview';
+    const row = document.createElement('div');
+    row.className = 'dmg-chips';
+    for (const c of chips) {
+      const span = document.createElement('span');
+      span.className = `dmg-chip dmg-chip-preview ${c.cls}`;
+      span.textContent = c.label;
+      row.appendChild(span);
+    }
+    el.appendChild(row);
+    const pos = enemy.mesh.position;
+    const scr = worldToScreen(pos.x, pos.y + 0.85, pos.z);
+    el.style.left = `${Math.round(scr.x)}px`;
+    el.style.top = `${Math.round(scr.y)}px`;
+    layer.appendChild(el);
+    activeAttackPreviews.set(enemy, el);
+  }
+}
+
+function repositionAttackPreviews() {
+  if (!activeAttackPreviews.size) return;
+  for (const [enemy, el] of activeAttackPreviews) {
+    if (!enemy || !enemy.mesh || enemy.hp <= 0) continue;
+    const pos = enemy.mesh.position;
+    const scr = worldToScreen(pos.x, pos.y + 0.85, pos.z);
+    el.style.left = `${Math.round(scr.x)}px`;
+    el.style.top = `${Math.round(scr.y)}px`;
+  }
+}
+
 /** Primary tell: damage float over defender (one per defender). */
 function showDamageFloat(defender, dmg, notes) {
   const layer = $('dmg-floats');
@@ -1455,6 +1512,7 @@ function resolveRetaliation(attacker, defender) {
 
 function doAttack(attacker, defender) {
   if (attacker.attacked) return;
+  clearAttackPreviews();
   const { mult, notes } = attackMultiplier(attacker, defender);
   const raw = attacker.def.atk + Math.floor(Math.random() * 2);
   const dmg = Math.max(1, Math.round(raw * mult));
