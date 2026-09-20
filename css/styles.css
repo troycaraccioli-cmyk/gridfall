@@ -221,7 +221,7 @@ button.ghost {
 
 #bottom-hud .panel {
   pointer-events: auto;
-  background: var(--panel);
+  background: rgba(12, 20, 36, 0.5); /* 50% transparent */
   border: 1px solid rgba(90, 160, 220, 0.3);
   border-radius: 16px;
   padding: 12px 14px;
@@ -286,4 +286,25 @@ button.ghost {
   .card { padding: 14px 16px; }
   .logo img { width: 42px; height: 42px; }
   #camera-hint { display: none; }
+}
+
+
+/* 50% transparent control chrome */
+#bottom-hud .panel,
+#top-hud .pill {
+  background: rgba(12, 20, 36, 0.5) !important;
+}
+
+#bottom-hud button,
+#bottom-hud .btn,
+#top-hud button,
+button.primary,
+button.ghost,
+.btn-row button {
+  background: rgba(26, 42, 68, 0.5) !important;
+  border-color: rgba(58, 85, 122, 0.55);
+}
+
+button.primary {
+  background: linear-gradient(180deg, rgba(36, 90, 140, 0.5), rgba(26, 58, 100, 0.5)) !important;
 }

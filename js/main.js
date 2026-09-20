@@ -106,7 +106,9 @@ function initThree() {
   controls.maxDistance = 48;
   controls.maxPolarAngle = Math.PI * 0.46;
   controls.minPolarAngle = 0.35;
-  controls.enablePan = false;
+  controls.enablePan = true;
+  controls.screenSpacePanning = true; // slide board in view X/Y with two fingers
+  controls.panSpeed = 1.1;
   controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
 
   const amb = new THREE.AmbientLight(0x6688aa, 0.55);
