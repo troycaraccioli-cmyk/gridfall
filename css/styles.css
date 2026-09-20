@@ -389,6 +389,17 @@ button.primary {
   font-weight: 800;
 }
 
+/* Feel v1: static attack-preview chips (selection, no rise) */
+.dmg-float-preview {
+  animation: none;
+  opacity: 0.88;
+  will-change: auto;
+}
+
+.dmg-chip-preview {
+  font-size: max(14px, 0.8rem);
+}
+
 @keyframes dmg-float-rise {
   0%   { opacity: 1; margin-top: 0; }
   70%  { opacity: 1; }
