@@ -1094,9 +1094,10 @@ function onPointerDown(e) {
   if (!gameActive || phase !== 'player') return;
   if (e.button !== undefined && e.button !== 0) return;
 
-  // Single pointer: freeze orbit/pan until drag or second finger
+  // Single pointer: keep rotate enabled so OrbitControls can start an orbit gesture.
+  // Only suppress pan (two-finger still pans). Tap vs drag is decided on pointerup.
   tapGesture = { id: e.pointerId, x: e.clientX, y: e.clientY, t: Date.now(), dragged: false };
-  controls.enableRotate = false;
+  controls.enableRotate = true;
   controls.enablePan = false;
 }
 
