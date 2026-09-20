@@ -27,7 +27,7 @@ function isEnemy(u) { return u.faction !== 'player'; }
 
 const $ = (id) => document.getElementById(id);
 
-const BUILD_ID = 'gridfall-v16';
+const BUILD_ID = 'gridfall-v17';
 
 const ui = {
   title: $('title-screen'),
@@ -98,7 +98,10 @@ const SPAWN_CORNERS = {
 };
 const HEIGHT_MIN = 0;
 const HEIGHT_MAX = 0.55; // visual elevation span
-const HEIGHT_STEP_MAX = (HEIGHT_MAX - HEIGHT_MIN) * 0.02; // ≤2% of full range per adjoining tile
+const HEIGHT_SPAN = HEIGHT_MAX - HEIGHT_MIN;
+const HEIGHT_STEP_MAX = HEIGHT_SPAN * 0.05; // walkable / cliff threshold (5% of span)
+const HEIGHT_GEN_STEP_MAX = HEIGHT_SPAN * 0.18; // gen may produce steeper faces so cliffs exist
+const CLIFF_THRESHOLD = HEIGHT_STEP_MAX;
 const DIRS8 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
 
 function key(x, z) { return `${x},${z}`; }
@@ -220,7 +223,21 @@ function unitWorldY(x, z) {
   return tileHeight(x, z) + 0.12;
 }
 
-/** Generate smooth heightmap; neighbor delta ≤ HEIGHT_STEP_MAX. */
+function heightDelta(ax, az, bx, bz) {
+  return tileHeight(ax, az) - tileHeight(bx, bz);
+}
+
+function isCliffEdge(ax, az, bx, bz) {
+  return Math.abs(heightDelta(ax, az, bx, bz)) > CLIFF_THRESHOLD;
+}
+
+/** Standing on high lip looking at low tile across a cliff edge. */
+function isCliffDown(fromX, fromZ, toX, toZ) {
+  return isCliffEdge(fromX, fromZ, toX, toZ)
+    && tileHeight(fromX, fromZ) > tileHeight(toX, toZ);
+}
+
+/** Generate heightmap; neighbor delta clamped with HEIGHT_GEN_STEP_MAX (cliffs allowed). */
 function generateHeights(rand) {
   const h = Array.from({ length: GRID }, () => Array(GRID).fill(0));
   // Seed corners / mid with mild noise then diffuse
@@ -245,7 +262,7 @@ function generateHeights(rand) {
     }
     for (let z = 0; z < GRID; z++) for (let x = 0; x < GRID; x++) h[z][x] = n[z][x];
   }
-  // Enforce 2% max step between neighbors (relax toward mean)
+  // Enforce gen max step between neighbors (looser than walkable cliff threshold)
   for (let iter = 0; iter < 40; iter++) {
     let changed = false;
     for (let z = 0; z < GRID; z++) {
@@ -254,9 +271,9 @@ function generateHeights(rand) {
           const nx = x + dx, nz = z + dz;
           if (!inBounds(nx, nz)) continue;
           const d = h[nz][nx] - h[z][x];
-          if (Math.abs(d) > HEIGHT_STEP_MAX) {
+          if (Math.abs(d) > HEIGHT_GEN_STEP_MAX) {
             const mid = (h[z][x] + h[nz][nx]) / 2;
-            const half = HEIGHT_STEP_MAX / 2;
+            const half = HEIGHT_GEN_STEP_MAX / 2;
             if (d > 0) { h[z][x] = mid - half; h[nz][nx] = mid + half; }
             else { h[z][x] = mid + half; h[nz][nx] = mid - half; }
             changed = true;
@@ -275,7 +292,7 @@ function generateHeights(rand) {
   for (let z = 0; z < GRID; z++) for (let x = 0; x < GRID; x++) {
     h[z][x] = HEIGHT_MIN + ((h[z][x] - mn) / span) * (HEIGHT_MAX - HEIGHT_MIN);
   }
-  // Re-clamp steps after normalize
+  // Re-clamp with gen step max after normalize
   for (let iter = 0; iter < 20; iter++) {
     let changed = false;
     for (let z = 0; z < GRID; z++) {
@@ -284,9 +301,9 @@ function generateHeights(rand) {
           const nx = x + dx, nz = z + dz;
           if (!inBounds(nx, nz)) continue;
           const d = h[nz][nx] - h[z][x];
-          if (Math.abs(d) > HEIGHT_STEP_MAX) {
+          if (Math.abs(d) > HEIGHT_GEN_STEP_MAX) {
             const mid = (h[z][x] + h[nz][nx]) / 2;
-            const half = HEIGHT_STEP_MAX / 2;
+            const half = HEIGHT_GEN_STEP_MAX / 2;
             if (d > 0) { h[z][x] = mid - half; h[nz][nx] = mid + half; }
             else { h[z][x] = mid + half; h[nz][nx] = mid - half; }
             changed = true;
@@ -308,14 +325,15 @@ function countAdjacentAllies(unit) {
   return n;
 }
 
-/** Attacker damage multiplier: height +2%, cluster +4%/+8%. */
+/** Attacker damage multiplier: elev bands +4/+8/+12/+16%, cluster +4%/+8%. */
 function attackMultiplier(attacker, defender) {
   let m = 1;
   const notes = [];
-  if (tileHeight(attacker.x, attacker.z) > tileHeight(defender.x, defender.z)) {
-    m *= 1.02;
-    notes.push('high ground +2%');
-  }
+  const elev = (tileHeight(attacker.x, attacker.z) - tileHeight(defender.x, defender.z)) / HEIGHT_SPAN;
+  if (elev >= 0.60) { m *= 1.16; notes.push('high +16%'); }
+  else if (elev >= 0.35) { m *= 1.12; notes.push('high +12%'); }
+  else if (elev >= 0.15) { m *= 1.08; notes.push('high +8%'); }
+  else if (elev > 0) { m *= 1.04; notes.push('high +4%'); }
   const allies = countAdjacentAllies(attacker);
   if (allies >= 2) { m *= 1.08; notes.push('formed 3+ +8%'); }
   else if (allies >= 1) { m *= 1.04; notes.push('paired +4%'); }
@@ -542,11 +560,19 @@ function buildBoard() {
       const highCol = new THREE.Color(0x3a6a4a);
       const col = lowCol.clone().lerp(highCol, tHigh);
       if (isObs) col.setHex(0x3a4558);
+      const tileOpacity = 0.55 + tHigh * 0.15; // ~0.55–0.70 translucent ground
       const mat = new THREE.MeshStandardMaterial({
         color: col,
         roughness: 0.78,
         metalness: 0.08,
+        transparent: true,
+        opacity: isObs ? 0.85 : tileOpacity,
       });
+      if (!isObs && tHigh >= 0.7) {
+        // Soft high-tile rim cue (top ~30% of height range)
+        mat.emissive = new THREE.Color(0x2a6a72);
+        mat.emissiveIntensity = 0.18;
+      }
       const mesh = new THREE.Mesh(geo, mat);
       const p = worldPos(x, z);
       const topY = (0.18 + height) / 2;
@@ -555,6 +581,21 @@ function buildBoard() {
       mesh.castShadow = true;
       mesh.userData = { type: 'tile', x, z };
       boardGroup.add(mesh);
+
+      if (!isObs && tHigh >= 0.7) {
+        const rim = new THREE.Mesh(
+          new THREE.PlaneGeometry(TILE * 0.92, TILE * 0.92),
+          new THREE.MeshBasicMaterial({
+            color: 0x5ec4c8,
+            transparent: true,
+            opacity: 0.22,
+            depthWrite: false,
+          })
+        );
+        rim.rotation.x = -Math.PI / 2;
+        rim.position.set(p.x, height + 0.185, p.z);
+        boardGroup.add(rim);
+      }
 
       if (isObs) {
         const rock = new THREE.Mesh(
@@ -566,6 +607,43 @@ function buildBoard() {
         boardGroup.add(rock);
       }
       tiles.push({ x, z, mesh, obstacle: isObs, height });
+    }
+  }
+
+  // Cliff faces from Systems isCliffEdge — steep dark steps only where flagged
+  const cliffMat = new THREE.MeshStandardMaterial({
+    color: 0x0e1a2c,
+    roughness: 0.95,
+    metalness: 0.02,
+    transparent: true,
+    opacity: 0.68,
+    flatShading: true,
+  });
+  for (let z = 0; z < GRID; z++) {
+    for (let x = 0; x < GRID; x++) {
+      for (const [dx, dz] of [[1, 0], [0, 1]]) {
+        const nx = x + dx, nz = z + dz;
+        if (!inBounds(nx, nz)) continue;
+        if (!isCliffEdge(x, z, nx, nz)) continue;
+        const hA = tileHeight(x, z);
+        const hB = tileHeight(nx, nz);
+        const drop = Math.abs(hA - hB);
+        const faceH = Math.max(0.06, drop);
+        const pA = worldPos(x, z);
+        const pB = worldPos(nx, nz);
+        const cx = (pA.x + pB.x) / 2;
+        const cz = (pA.z + pB.z) / 2;
+        const topLo = 0.18 + Math.min(hA, hB);
+        const geo = dx !== 0
+          ? new THREE.BoxGeometry(0.07, faceH, TILE * 0.98)
+          : new THREE.BoxGeometry(TILE * 0.98, faceH, 0.07);
+        const face = new THREE.Mesh(geo, cliffMat);
+        face.position.set(cx, topLo + faceH / 2, cz);
+        face.castShadow = true;
+        face.receiveShadow = true;
+        face.userData = { type: 'cliff' };
+        boardGroup.add(face);
+      }
     }
   }
 }
@@ -1045,6 +1123,7 @@ function bfsReachable(sx, sz, movePts, ignoreUnit = null) {
       if (!inBounds(nx, nz)) continue;
       const t = tileAt(nx, nz);
       if (!t || t.obstacle) continue;
+      if (isCliffEdge(x, z, nx, nz)) continue; // cliff face blocks pathing both ways
       const occ = unitAt(nx, nz);
       if (occ && occ !== ignoreUnit) continue;
       const nk = key(nx, nz);
@@ -1064,7 +1143,12 @@ function getAttackTargets(unit) {
     if (e.hp <= 0 || e.faction === unit.faction) continue;
     const d = chebyshev(unit.x, unit.z, e.x, e.z);
     if (unit.type === 'archer') {
-      // Archer: Chebyshev 2–3 only, LOS required on every shot (no adjacent)
+      // Cliff-lip exception: d=1 only when shooting down a cliff edge
+      if (d === 1 && isCliffDown(unit.x, unit.z, e.x, e.z)) {
+        set.add(key(e.x, e.z));
+        continue;
+      }
+      // Archer: Chebyshev 2–3, LOS required (no flat adjacent)
       if (d < (unit.def.minRange || 2) || d > (unit.def.range || 3)) continue;
       if (!losClear(unit.x, unit.z, e.x, e.z, unit.faction)) continue;
       set.add(key(e.x, e.z));
@@ -1088,7 +1172,7 @@ function clearHighlights() {
   clearAttackPreviews();
 }
 
-function addHighlight(x, z, color, opacity = 0.45) {
+function addHighlight(x, z, color, opacity = 0.45, opts = {}) {
   const p = worldPos(x, z);
   const m = new THREE.Mesh(
     new THREE.PlaneGeometry(TILE * 0.88, TILE * 0.88),
@@ -1097,6 +1181,21 @@ function addHighlight(x, z, color, opacity = 0.45) {
   m.rotation.x = -Math.PI / 2;
   m.position.set(p.x, tileHeight(x, z) + 0.2, p.z);
   highlightGroup.add(m);
+  // Feel: high-ground attackable — cooler/brighter rim on the red plane (no enemy glyphs)
+  if (opts.highGround) {
+    const rim = new THREE.Mesh(
+      new THREE.PlaneGeometry(TILE * 0.96, TILE * 0.96),
+      new THREE.MeshBasicMaterial({
+        color: 0xff9eb0,
+        transparent: true,
+        opacity: Math.min(0.85, opacity + 0.22),
+        depthWrite: false,
+      })
+    );
+    rim.rotation.x = -Math.PI / 2;
+    rim.position.set(p.x, tileHeight(x, z) + 0.195, p.z);
+    highlightGroup.add(rim);
+  }
 }
 
 function refreshSelectionVisuals() {
@@ -1116,7 +1215,9 @@ function refreshSelectionVisuals() {
     attackable = getAttackTargets(selected);
     for (const k of attackable) {
       const [x, z] = k.split(',').map(Number);
-      addHighlight(x, z, 0xff5d7a, 0.5);
+      const elev = (tileHeight(selected.x, selected.z) - tileHeight(x, z)) / HEIGHT_SPAN;
+      if (elev > 0) addHighlight(x, z, 0xff6a88, 0.58, { highGround: true });
+      else addHighlight(x, z, 0xff5d7a, 0.5);
     }
     showAttackPreviews(selected);
   }
@@ -1136,7 +1237,9 @@ function updateUnitInfo() {
   }
   const canMove = !selected.moved ? `Move ${selected.def.move}` : 'Moved';
   const canAtk = !selected.attacked ? `Atk ${selected.def.atk} (rng ${selected.def.minRange}–${selected.def.range})` : 'Attacked';
-  ui.unitInfo.innerHTML = `<strong>${selected.def.name}</strong> · HP ${selected.hp}/${selected.maxHp}<br>${canMove} · ${canAtk}`;
+  const allies = countAdjacentAllies(selected);
+  const formHud = allies >= 2 ? ' · ◆◆ form' : allies >= 1 ? ' · ◆ pair' : '';
+  ui.unitInfo.innerHTML = `<strong>${selected.def.name}</strong> · HP ${selected.hp}/${selected.maxHp}<br>${canMove} · ${canAtk}${formHud}`;
 }
 
 function updateHudCounts() {
@@ -1324,8 +1427,11 @@ function handleTap(e) {
 function bonusChips(notes) {
   const chips = [];
   for (const n of notes) {
-    if (n.includes('high')) chips.push({ cls: 'high', label: '▲ +2%', hud: '▲ high' });
-    else if (n.includes('formed')) chips.push({ cls: 'form', label: '◆◆ +8%', hud: '◆◆ form' });
+    if (n.includes('high')) {
+      const m = n.match(/\+(\d+)%/);
+      const pct = m ? m[1] : '4';
+      chips.push({ cls: 'high', label: `▲ +${pct}%`, hud: '▲ high' });
+    } else if (n.includes('formed')) chips.push({ cls: 'form', label: '◆◆ +8%', hud: '◆◆ form' });
     else if (n.includes('paired')) chips.push({ cls: 'pair', label: '◆ +4%', hud: '◆ pair' });
   }
   return chips.slice(0, 2);
@@ -1348,44 +1454,44 @@ function clearAttackPreviews() {
   activeAttackPreviews.clear();
 }
 
-/** Static bonus chips over attackable enemies while a cyan unit can still attack. */
+/** Formation preview chips on selected cyan only (high-ground = red highlight tint). */
 function showAttackPreviews(attacker) {
   clearAttackPreviews();
   if (!attacker || attacker.hp <= 0 || attacker.attacked || phase !== 'player') return;
+  if (!attacker.mesh) return;
   const layer = $('dmg-floats');
   if (!layer) return;
-  for (const k of attackable) {
-    const [x, z] = k.split(',').map(Number);
-    const enemy = unitAt(x, z);
-    if (!enemy || enemy.hp <= 0 || !enemy.mesh) continue;
-    const { notes } = attackMultiplier(attacker, enemy);
-    const chips = bonusChips(notes);
-    if (!chips.length) continue;
-    const el = document.createElement('div');
-    el.className = 'dmg-float dmg-float-preview';
-    const row = document.createElement('div');
-    row.className = 'dmg-chips';
-    for (const c of chips) {
-      const span = document.createElement('span');
-      span.className = `dmg-chip dmg-chip-preview ${c.cls}`;
-      span.textContent = c.label;
-      row.appendChild(span);
-    }
-    el.appendChild(row);
-    const pos = enemy.mesh.position;
-    const scr = worldToScreen(pos.x, pos.y + 0.85, pos.z);
-    el.style.left = `${Math.round(scr.x)}px`;
-    el.style.top = `${Math.round(scr.y)}px`;
-    layer.appendChild(el);
-    activeAttackPreviews.set(enemy, el);
+  // Attacker-side formation only — never put preview glyphs on idle enemies
+  const allies = countAdjacentAllies(attacker);
+  const notes = [];
+  if (allies >= 2) notes.push('formed 3+ +8%');
+  else if (allies >= 1) notes.push('paired +4%');
+  const chips = bonusChips(notes);
+  if (!chips.length) return;
+  const el = document.createElement('div');
+  el.className = 'dmg-float dmg-float-preview';
+  const row = document.createElement('div');
+  row.className = 'dmg-chips';
+  for (const c of chips) {
+    const span = document.createElement('span');
+    span.className = `dmg-chip dmg-chip-preview ${c.cls}`;
+    span.textContent = c.label;
+    row.appendChild(span);
   }
+  el.appendChild(row);
+  const pos = attacker.mesh.position;
+  const scr = worldToScreen(pos.x, pos.y + 0.85, pos.z);
+  el.style.left = `${Math.round(scr.x)}px`;
+  el.style.top = `${Math.round(scr.y)}px`;
+  layer.appendChild(el);
+  activeAttackPreviews.set(attacker, el);
 }
 
 function repositionAttackPreviews() {
   if (!activeAttackPreviews.size) return;
-  for (const [enemy, el] of activeAttackPreviews) {
-    if (!enemy || !enemy.mesh || enemy.hp <= 0) continue;
-    const pos = enemy.mesh.position;
+  for (const [unit, el] of activeAttackPreviews) {
+    if (!unit || !unit.mesh || unit.hp <= 0) continue;
+    const pos = unit.mesh.position;
     const scr = worldToScreen(pos.x, pos.y + 0.85, pos.z);
     el.style.left = `${Math.round(scr.x)}px`;
     el.style.top = `${Math.round(scr.y)}px`;
