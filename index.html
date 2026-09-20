@@ -24,7 +24,7 @@
       <div class="pill" id="turn-pill"><span class="label">Turn</span><span id="turn-num">1</span></div>
       <div class="pill player" id="phase-pill">Your turn</div>
       <div class="pill" id="score-pill"><span class="label">You</span><span id="player-count">0</span> · <span class="label">AI</span><span id="enemy-count">0</span></div>
-      <div class="pill muted" id="build-chip" title="Build ID">gridfall-v15</div>
+      <div class="pill muted" id="build-chip" title="Build ID">gridfall-v17</div>
     </div>
   </div>
 
@@ -69,8 +69,10 @@
         <li><strong>Attack</strong> by tapping a red-highlighted enemy in range (after or instead of moving, once per unit).</li>
         <li>Tap <strong>End Turn</strong> — Ember, Ash, and Cinder move automatically.</li>
         <li><strong>Win</strong> by defeating all rival units (Ember, Ash, and Cinder). <strong>Lose</strong> if all of your units fall.</li>
-        <li><strong>Terrain</strong> — rolling high/low ground (neighbor height shifts stay within 2%). Attacking from higher ground deals +2% damage.</li>
+        <li><strong>Cliffs</strong> — Big height drops between tiles can’t be walked. Path around.</li>
+        <li><strong>High ground</strong> — The higher you are vs your target, the harder you hit (up to +16%).</li>
         <li><strong>Formation</strong> — adjacent allies (including diagonals) strengthen attacks: +4% when paired, +8% when 3+ are together.</li>
+        <li><strong>World labels</strong> — Over-piece chips and hit floats stay light (not bold) and mostly see-through so silhouettes stay readable. Idle pieces show no world text.</li>
         <li><strong>Facing</strong> — strike any of the 8 neighboring tiles (front, sides, back, diagonals).</li>
         <li><strong>Melee units (Infantry, Bastion)</strong> strike back once per phase when hit from an adjacent tile. Archers never retaliate.</li>
         <li><strong>Fog of war (AI)</strong> — rival armies do not know your positions until a unit is within 1 tile; they scout separately and will not all pile on at once from the start.</li>
@@ -79,7 +81,7 @@
       <p class="tagline" style="margin-top:0.75rem;font-size:0.85rem;">After an update: hard-refresh or clear site data so the service worker picks up the new cache. URL <code>?fresh=1</code> forces update toast.</p>
       <div class="units-key">
         <div class="row"><span class="dot inf"></span><div><strong style="color:var(--text)">Infantry</strong> — Move 3, melee attack 1 tile, balanced.</div></div>
-        <div class="row"><span class="dot rng"></span><div><strong style="color:var(--text)">Archer</strong> — Move 2, HP 7, Atk 3. Shoots <strong>2–3</strong> tiles (Chebyshev). Needs clear line of sight; can shoot over friendlies, not through enemies or rocks. <strong>Cannot shoot adjacent.</strong></div></div>
+        <div class="row"><span class="dot rng"></span><div><strong style="color:var(--text)">Archer</strong> — Move 2, HP 7, Atk 3. Shoots <strong>2–3</strong> tiles (Chebyshev) with clear LOS. <strong>Exception:</strong> from a cliff’s high lip, can shoot the enemy on the low tile right across that cliff. Still cannot shoot flat-adjacent or up the cliff at range 1.</div></div>
         <div class="row"><span class="dot tnk"></span><div><strong style="color:var(--text)">Bastion</strong> — Move 2, tough armor, melee smash.</div></div>
         <div class="row"><span class="dot enemy"></span><div><strong style="color:var(--text)">Rival armies</strong> — Ember (orange), Ash (purple), Cinder (rose) — 10 units each (1 Bastion, 5 Infantry, 4 Archers), one per corner.</div></div>
       </div>
