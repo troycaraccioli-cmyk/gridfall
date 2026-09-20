@@ -27,7 +27,7 @@ function isEnemy(u) { return u.faction !== 'player'; }
 
 const $ = (id) => document.getElementById(id);
 
-const BUILD_ID = 'gridfall-v14';
+const BUILD_ID = 'gridfall-v15';
 
 const ui = {
   title: $('title-screen'),
@@ -1001,6 +1001,7 @@ function spawnUnits() {
       maxHp: def.hp,
       moved: false,
       attacked: false,
+      retaliated: false,
       mesh,
       def,
     };
@@ -1407,6 +1408,51 @@ function doMove(unit, x, z) {
   toast(`${unit.def.name} moved`);
 }
 
+
+function canRetaliate(unit) {
+  return !!unit && (unit.type === 'infantry' || unit.type === 'bastion');
+}
+
+/** Clear once-per-phase retal budget for all living units (player phase + runAI entry). */
+function clearRetaliationFlags() {
+  for (const u of units) {
+    if (u.hp > 0) u.retaliated = false;
+  }
+}
+
+/**
+ * Melee retaliation: defender hits attacker once if adjacent infantry/bastion and !retaliated.
+ * Full normal damage pipeline; does not consume defender moved/attacked.
+ */
+function resolveRetaliation(attacker, defender) {
+  if (!attacker || !defender) return false;
+  if (defender.hp <= 0 || attacker.hp <= 0) return false;
+  if (chebyshev(attacker.x, attacker.z, defender.x, defender.z) !== 1) return false;
+  if (!canRetaliate(defender)) return false;
+  if (defender.retaliated) return false;
+
+  const { mult, notes } = attackMultiplier(defender, attacker);
+  const retalNotes = notes.concat(['retaliation']);
+  const raw = defender.def.atk + Math.floor(Math.random() * 2);
+  const dmg = Math.max(1, Math.round(raw * mult));
+  attacker.hp -= dmg;
+  defender.retaliated = true;
+  updateHpBar(attacker);
+  flashCombat(defender, attacker, retalNotes);
+  showDamageFloat(attacker, dmg, retalNotes);
+  if (attacker.hp <= 0) {
+    attacker.hp = 0;
+    unitsGroup.remove(attacker.mesh);
+    toast(`${attacker.def.name} destroyed!`, 1400);
+    if (selected === attacker) {
+      selected = null;
+      clearHighlights();
+    }
+    return true;
+  }
+  return false;
+}
+
 function doAttack(attacker, defender) {
   if (attacker.attacked) return;
   const { mult, notes } = attackMultiplier(attacker, defender);
@@ -1422,10 +1468,13 @@ function doAttack(attacker, defender) {
     defender.hp = 0;
     unitsGroup.remove(defender.mesh);
     toast(`${defender.def.name} destroyed!`, 1400);
+  } else {
+    resolveRetaliation(attacker, defender);
   }
   updateIntelFromContact();
   refreshSelectionVisuals();
   updateHudCounts();
+  updateUnitInfo();
   showHitHud(dmg, notes);
   checkWinLose();
 }
@@ -1501,6 +1550,7 @@ async function endPlayerTurn() {
   if (phase === 'ended') return;
   turn += 1;
   phase = 'player';
+  clearRetaliationFlags();
   resetUnitActions('player');
   ui.phase.textContent = 'Your turn';
   ui.phase.classList.add('player');
@@ -1516,6 +1566,8 @@ function sleep(ms) {
 }
 
 async function runAI() {
+  // Fresh retal budget for the whole enemy phase (not per-faction mid-AI)
+  clearRetaliationFlags();
   // Each rival army acts separately with its own fog-of-war knowledge
   const factions = ['ember', 'ash', 'cinder'];
   // Shuffle order so they do not always pile on together
@@ -1629,11 +1681,16 @@ function doAttackAI(attacker, defender) {
   updateHpBar(defender);
   flashCombat(attacker, defender, notes);
   showDamageFloat(defender, dmg, notes);
+  let retalKilledAttacker = false;
   if (defender.hp <= 0) {
     defender.hp = 0;
     unitsGroup.remove(defender.mesh);
+  } else {
+    retalKilledAttacker = resolveRetaliation(attacker, defender);
   }
   updateIntelFromContact();
+  // Primary kills already trip checkWinLoseEarly after aiAct; retal-kill needs an explicit check.
+  if (retalKilledAttacker) checkWinLose();
 }
 
 function startGame() {
