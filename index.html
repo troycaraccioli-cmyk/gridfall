@@ -49,7 +49,7 @@
           <p class="tagline" style="margin:0">3D turn-based strategy · four armies</p>
         </div>
       </div>
-      <p class="tagline">Command cyan forces from the southwest corner. Three rival armies hold the other corners. Win by defeating every enemy unit on the board. Each army fields 10 units. Matches last about 5–10 minutes.</p>
+      <p class="tagline">Command cyan forces from the southwest corner. Three rival armies hold the other corners. Win by wiping out rival armies. High ground and clustered units hit harder. Enemy armies scout in fog until they make contact. Each army fields 10 units.</p>
       <div class="btn-row">
         <button type="button" id="btn-play" class="primary">Play</button>
         <button type="button" id="btn-howto" class="ghost">How to Play</button>
@@ -66,6 +66,11 @@
         <li><strong>Attack</strong> by tapping a red-highlighted enemy in range (after or instead of moving, once per unit).</li>
         <li>Tap <strong>End Turn</strong> — Ember, Ash, and Cinder move automatically.</li>
         <li><strong>Win</strong> by defeating all rival units (Ember, Ash, and Cinder). <strong>Lose</strong> if all of your units fall.</li>
+        <li><strong>Terrain</strong> — rolling high/low ground (neighbor height shifts stay within 2%). Attacking from higher ground deals +2% damage.</li>
+        <li><strong>Formation</strong> — adjacent allies (including diagonals) strengthen attacks: +4% when paired, +8% when 3+ are together.</li>
+        <li><strong>Facing</strong> — strike any of the 8 neighboring tiles (front, sides, back, diagonals).</li>
+        <li><strong>Archers</strong> — shoot adjacent by default; range extends up to 3 through empty tiles or over friendlies (not through enemies/rocks).</li>
+        <li><strong>Fog of war (AI)</strong> — rival armies do not know your positions until a unit is within 1 tile; they scout separately and will not all pile on at once from the start.</li>
       </ol>
       <div class="units-key">
         <div class="row"><span class="dot inf"></span><div><strong style="color:var(--text)">Infantry</strong> — Move 3, melee attack 1 tile, balanced.</div></div>

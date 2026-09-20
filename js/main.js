@@ -11,7 +11,7 @@ const HALF = ((GRID - 1) * TILE) / 2;
 
 const UNIT_DEFS = {
   infantry: { name: 'Infantry', move: 3, hp: 10, atk: 4, range: 1, minRange: 1, colorPlayer: 0x3ad7ff, colorEnemy: 0xff7a3a, shape: 'knight' },
-  archer:   { name: 'Archer',   move: 2, hp: 7,  atk: 3, range: 3, minRange: 2, colorPlayer: 0x7dffb0, colorEnemy: 0xffaa66, shape: 'archer' },
+  archer:   { name: 'Archer',   move: 2, hp: 7,  atk: 3, range: 1, minRange: 1, losRange: 3, colorPlayer: 0x7dffb0, colorEnemy: 0xffaa66, shape: 'archer' },
   bastion:  { name: 'Bastion',  move: 2, hp: 16, atk: 5, range: 1, minRange: 1, colorPlayer: 0x8ab4ff, colorEnemy: 0xff5577, shape: 'carriage' },
 };
 
@@ -56,6 +56,12 @@ let turn = 1;
 let phase = 'player'; // player | ai | ended
 let gameActive = false;
 let toastTimer = null;
+/** Per-faction set of unit ids that faction has discovered (Chebyshev ≤ 1 contact). */
+let factionIntel = { player: new Set(), ember: new Set(), ash: new Set(), cinder: new Set() };
+const HEIGHT_MIN = 0;
+const HEIGHT_MAX = 0.55; // visual elevation span
+const HEIGHT_STEP_MAX = (HEIGHT_MAX - HEIGHT_MIN) * 0.02; // ≤2% of full range per adjoining tile
+const DIRS8 = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
 
 function key(x, z) { return `${x},${z}`; }
 
@@ -160,6 +166,177 @@ function worldPos(gx, gz) {
   return new THREE.Vector3(gx * TILE - HALF, 0, gz * TILE - HALF);
 }
 
+function chebyshev(x1, z1, x2, z2) {
+  return Math.max(Math.abs(x1 - x2), Math.abs(z1 - z2));
+}
+
+function tileHeight(x, z) {
+  const t = tileAt(x, z);
+  return t ? t.height : 0;
+}
+
+function unitWorldY(x, z) {
+  return tileHeight(x, z) + 0.12;
+}
+
+/** Generate smooth heightmap; neighbor delta ≤ HEIGHT_STEP_MAX. */
+function generateHeights(rand) {
+  const h = Array.from({ length: GRID }, () => Array(GRID).fill(0));
+  // Seed corners / mid with mild noise then diffuse
+  for (let z = 0; z < GRID; z++) {
+    for (let x = 0; x < GRID; x++) {
+      h[z][x] = HEIGHT_MIN + rand() * (HEIGHT_MAX - HEIGHT_MIN);
+    }
+  }
+  for (let pass = 0; pass < 8; pass++) {
+    const n = h.map((row) => row.slice());
+    for (let z = 0; z < GRID; z++) {
+      for (let x = 0; x < GRID; x++) {
+        let s = h[z][x], c = 1;
+        for (const [dx, dz] of DIRS8) {
+          const nx = x + dx, nz = z + dz;
+          if (!inBounds(nx, nz)) continue;
+          s += h[nz][nx];
+          c++;
+        }
+        n[z][x] = s / c;
+      }
+    }
+    for (let z = 0; z < GRID; z++) for (let x = 0; x < GRID; x++) h[z][x] = n[z][x];
+  }
+  // Enforce 2% max step between neighbors (relax toward mean)
+  for (let iter = 0; iter < 40; iter++) {
+    let changed = false;
+    for (let z = 0; z < GRID; z++) {
+      for (let x = 0; x < GRID; x++) {
+        for (const [dx, dz] of [[1,0],[0,1]]) {
+          const nx = x + dx, nz = z + dz;
+          if (!inBounds(nx, nz)) continue;
+          const d = h[nz][nx] - h[z][x];
+          if (Math.abs(d) > HEIGHT_STEP_MAX) {
+            const mid = (h[z][x] + h[nz][nx]) / 2;
+            const half = HEIGHT_STEP_MAX / 2;
+            if (d > 0) { h[z][x] = mid - half; h[nz][nx] = mid + half; }
+            else { h[z][x] = mid + half; h[nz][nx] = mid - half; }
+            changed = true;
+          }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  // Normalize into [HEIGHT_MIN, HEIGHT_MAX] while preserving relative diffs roughly
+  let mn = Infinity, mx = -Infinity;
+  for (let z = 0; z < GRID; z++) for (let x = 0; x < GRID; x++) {
+    mn = Math.min(mn, h[z][x]); mx = Math.max(mx, h[z][x]);
+  }
+  const span = Math.max(1e-6, mx - mn);
+  for (let z = 0; z < GRID; z++) for (let x = 0; x < GRID; x++) {
+    h[z][x] = HEIGHT_MIN + ((h[z][x] - mn) / span) * (HEIGHT_MAX - HEIGHT_MIN);
+  }
+  // Re-clamp steps after normalize
+  for (let iter = 0; iter < 20; iter++) {
+    let changed = false;
+    for (let z = 0; z < GRID; z++) {
+      for (let x = 0; x < GRID; x++) {
+        for (const [dx, dz] of [[1,0],[0,1]]) {
+          const nx = x + dx, nz = z + dz;
+          if (!inBounds(nx, nz)) continue;
+          const d = h[nz][nx] - h[z][x];
+          if (Math.abs(d) > HEIGHT_STEP_MAX) {
+            const mid = (h[z][x] + h[nz][nx]) / 2;
+            const half = HEIGHT_STEP_MAX / 2;
+            if (d > 0) { h[z][x] = mid - half; h[nz][nx] = mid + half; }
+            else { h[z][x] = mid + half; h[nz][nx] = mid - half; }
+            changed = true;
+          }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  return h;
+}
+
+function countAdjacentAllies(unit) {
+  let n = 0;
+  for (const o of units) {
+    if (o === unit || o.hp <= 0 || o.faction !== unit.faction) continue;
+    if (chebyshev(unit.x, unit.z, o.x, o.z) === 1) n++;
+  }
+  return n;
+}
+
+/** Attacker damage multiplier: height +2%, cluster +4%/+8%. */
+function attackMultiplier(attacker, defender) {
+  let m = 1;
+  const notes = [];
+  if (tileHeight(attacker.x, attacker.z) > tileHeight(defender.x, defender.z)) {
+    m *= 1.02;
+    notes.push('high ground +2%');
+  }
+  const allies = countAdjacentAllies(attacker);
+  if (allies >= 2) { m *= 1.08; notes.push('formed 3+ +8%'); }
+  else if (allies >= 1) { m *= 1.04; notes.push('paired +4%'); }
+  return { mult: m, notes };
+}
+
+function losClear(x0, z0, x1, z1, faction) {
+  // Bresenham through intermediate tiles; blockers: obstacles or enemy units
+  let x = x0, z = z0;
+  const dx = Math.abs(x1 - x0), dz = Math.abs(z1 - z0);
+  const sx = x0 < x1 ? 1 : -1;
+  const sz = z0 < z1 ? 1 : -1;
+  let err = dx - dz;
+  while (true) {
+    if (!(x === x0 && z === z0) && !(x === x1 && z === z1)) {
+      const t = tileAt(x, z);
+      if (!t || t.obstacle) return false;
+      const u = unitAt(x, z);
+      if (u && u.faction !== faction) return false;
+      // friendly or empty OK
+    }
+    if (x === x1 && z === z1) break;
+    const e2 = 2 * err;
+    if (e2 > -dz) { err -= dz; x += sx; }
+    if (e2 < dx) { err += dx; z += sz; }
+  }
+  return true;
+}
+
+function resetIntel() {
+  factionIntel = { player: new Set(), ember: new Set(), ash: new Set(), cinder: new Set() };
+  // Own units always known to self
+  for (const u of units) {
+    if (u.hp <= 0) continue;
+    if (!factionIntel[u.faction]) factionIntel[u.faction] = new Set();
+    factionIntel[u.faction].add(u.id);
+  }
+  updateIntelFromContact();
+}
+
+function updateIntelFromContact() {
+  const live = units.filter((u) => u.hp > 0);
+  for (let i = 0; i < live.length; i++) {
+    for (let j = i + 1; j < live.length; j++) {
+      const a = live[i], b = live[j];
+      if (a.faction === b.faction) continue;
+      if (chebyshev(a.x, a.z, b.x, b.z) <= 1) {
+        if (!factionIntel[a.faction]) factionIntel[a.faction] = new Set();
+        if (!factionIntel[b.faction]) factionIntel[b.faction] = new Set();
+        factionIntel[a.faction].add(b.id);
+        factionIntel[b.faction].add(a.id);
+      }
+    }
+  }
+}
+
+function knownEnemies(faction) {
+  const known = factionIntel[faction] || new Set();
+  return units.filter((u) => u.hp > 0 && u.faction !== faction && known.has(u.id));
+}
+
+
 function buildBoard() {
   while (boardGroup.children.length) boardGroup.remove(boardGroup.children[0]);
   tiles = [];
@@ -167,18 +344,16 @@ function buildBoard() {
   // 20 rocks; keep all four spawn corners clear (no center objective)
   const obstacles = new Set();
   const banned = new Set();
-  // Keep all four army corners clear of rocks
   for (let z = 0; z < 5; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
   for (let z = 0; z < 5; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
   for (let z = GRID - 5; z < GRID; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
   for (let z = GRID - 5; z < GRID; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
-    const candidates = [];
+  const candidates = [];
   for (let z = 0; z < GRID; z++) {
     for (let x = 0; x < GRID; x++) {
       if (!banned.has(key(x, z))) candidates.push([x, z]);
     }
   }
-  // deterministic shuffle for stable maps
   let seed = 42;
   const rand = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
   for (let i = candidates.length - 1; i > 0; i--) {
@@ -189,19 +364,28 @@ function buildBoard() {
     obstacles.add(key(candidates[i][0], candidates[i][1]));
   }
 
+  const heights = generateHeights(rand);
+
   for (let z = 0; z < GRID; z++) {
     for (let x = 0; x < GRID; x++) {
       const isObs = obstacles.has(key(x, z));
-      const checker = (x + z) % 2 === 0;
-      const geo = new THREE.BoxGeometry(TILE * 0.92, 0.18, TILE * 0.92);
+      const height = heights[z][x];
+      const tHigh = (height - HEIGHT_MIN) / Math.max(1e-6, HEIGHT_MAX - HEIGHT_MIN);
+      // Seamless tiles (no visible gaps/lines): full TILE footprint, slight overlap
+      const geo = new THREE.BoxGeometry(TILE * 1.02, 0.18 + height, TILE * 1.02);
+      const lowCol = new THREE.Color(0x16304f);
+      const highCol = new THREE.Color(0x3a6a4a);
+      const col = lowCol.clone().lerp(highCol, tHigh);
+      if (isObs) col.setHex(0x3a4558);
       const mat = new THREE.MeshStandardMaterial({
-        color: isObs ? 0x3a4558 : (checker ? 0x1e3a5f : 0x16304f),
-        roughness: 0.7,
-        metalness: 0.15,
+        color: col,
+        roughness: 0.78,
+        metalness: 0.08,
       });
       const mesh = new THREE.Mesh(geo, mat);
       const p = worldPos(x, z);
-      mesh.position.set(p.x, 0.05, p.z);
+      const topY = (0.18 + height) / 2;
+      mesh.position.set(p.x, topY, p.z);
       mesh.receiveShadow = true;
       mesh.castShadow = true;
       mesh.userData = { type: 'tile', x, z };
@@ -212,14 +396,13 @@ function buildBoard() {
           new THREE.DodecahedronGeometry(0.35, 0),
           new THREE.MeshStandardMaterial({ color: 0x6a7388, roughness: 0.9 })
         );
-        rock.position.set(p.x, 0.45, p.z);
+        rock.position.set(p.x, height + 0.45, p.z);
         rock.castShadow = true;
         boardGroup.add(rock);
       }
-      tiles.push({ x, z, mesh, obstacle: isObs });
+      tiles.push({ x, z, mesh, obstacle: isObs, height });
     }
   }
-
 }
 
 function makeArcherFigure(color) {
@@ -642,7 +825,7 @@ function spawnUnits() {
     const def = UNIT_DEFS[L.type];
     const mesh = makeUnitMesh(def, L.faction);
     const p = worldPos(L.x, L.z);
-    mesh.position.set(p.x, 0, p.z);
+    mesh.position.set(p.x, unitWorldY(L.x, L.z), p.z);
     mesh.userData = { type: 'unit' };
     unitsGroup.add(mesh);
     const u = {
@@ -662,6 +845,7 @@ function spawnUnits() {
     units.push(u);
     updateHpBar(u);
   }
+  resetIntel();  resetIntel();
 }
 
 
@@ -690,7 +874,7 @@ function bfsReachable(sx, sz, movePts, ignoreUnit = null) {
     const [x, z, d] = q.shift();
     if (d > 0) out.add(key(x, z));
     if (d >= movePts) continue;
-    for (const [dx, dz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+    for (const [dx, dz] of DIRS8) {
       const nx = x + dx, nz = z + dz;
       if (!inBounds(nx, nz)) continue;
       const t = tileAt(nx, nz);
@@ -712,8 +896,15 @@ function getAttackTargets(unit) {
   const set = new Set();
   for (const e of units) {
     if (e.hp <= 0 || e.faction === unit.faction) continue;
-    const d = manhattan(unit.x, unit.z, e.x, e.z);
-    if (d >= unit.def.minRange && d <= unit.def.range) set.add(key(e.x, e.z));
+    const d = chebyshev(unit.x, unit.z, e.x, e.z);
+    if (unit.type === 'archer') {
+      const maxR = unit.def.losRange || 3;
+      if (d <= 1) set.add(key(e.x, e.z));
+      else if (d <= maxR && losClear(unit.x, unit.z, e.x, e.z, unit.faction)) set.add(key(e.x, e.z));
+    } else {
+      // Melee: any adjacent tile including diagonals
+      if (d >= (unit.def.minRange || 1) && d <= (unit.def.range || 1)) set.add(key(e.x, e.z));
+    }
   }
   return set;
 }
@@ -736,7 +927,7 @@ function addHighlight(x, z, color, opacity = 0.45) {
     new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false })
   );
   m.rotation.x = -Math.PI / 2;
-  m.position.set(p.x, 0.16, p.z);
+  m.position.set(p.x, tileHeight(x, z) + 0.2, p.z);
   highlightGroup.add(m);
 }
 
@@ -894,7 +1085,8 @@ function doMove(unit, x, z) {
   unit.z = z;
   unit.moved = true;
   const p = worldPos(x, z);
-  unit.mesh.position.set(p.x, 0, p.z);
+  unit.mesh.position.set(p.x, unitWorldY(x, z), p.z);
+  updateIntelFromContact();
   refreshSelectionVisuals();
   updateUnitInfo();
   toast(`${unit.def.name} moved`);
@@ -902,22 +1094,22 @@ function doMove(unit, x, z) {
 
 function doAttack(attacker, defender) {
   if (attacker.attacked) return;
-  const dmg = attacker.def.atk + Math.floor(Math.random() * 2); // 0–1 variance
+  const { mult, notes } = attackMultiplier(attacker, defender);
+  const raw = attacker.def.atk + Math.floor(Math.random() * 2);
+  const dmg = Math.max(1, Math.round(raw * mult));
   defender.hp -= dmg;
   attacker.attacked = true;
-  attacker.moved = true; // committing attack ends movement
+  attacker.moved = true;
   updateHpBar(defender);
-  toast(`${attacker.def.name} hits for ${dmg}`);
-
-  // Flash
+  const bonus = notes.length ? ` (${notes.join(', ')})` : '';
+  toast(`${attacker.def.name} hits for ${dmg}${bonus}`);
   pulseMesh(defender.mesh);
-
   if (defender.hp <= 0) {
     defender.hp = 0;
     unitsGroup.remove(defender.mesh);
     toast(`${defender.def.name} destroyed!`, 1400);
   }
-
+  updateIntelFromContact();
   refreshSelectionVisuals();
   updateUnitInfo();
   updateHudCounts();
@@ -992,19 +1184,27 @@ function sleep(ms) {
 }
 
 async function runAI() {
-  ['ember','ash','cinder'].forEach(resetUnitActions);
-  const enemies = units.filter((u) => u.faction !== 'player' && u.hp > 0);
-  // Sort: prefer bastions last, archers that can shoot first-ish
-  enemies.sort((a, b) => a.def.range - b.def.range);
-
-  for (const unit of enemies) {
-    if (phase === 'ended') return;
-    await sleep(280);
-    aiAct(unit);
-    updateHudCounts();
-    if (checkWinLoseEarly()) return;
+  // Each rival army acts separately with its own fog-of-war knowledge
+  const factions = ['ember', 'ash', 'cinder'];
+  // Shuffle order so they do not always pile on together
+  for (let i = factions.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [factions[i], factions[j]] = [factions[j], factions[i]];
   }
-
+  for (const fac of factions) {
+    resetUnitActions(fac);
+    const squad = units.filter((u) => u.faction === fac && u.hp > 0);
+    squad.sort((a, b) => a.def.range - b.def.range);
+    for (const unit of squad) {
+      if (phase === 'ended') return;
+      await sleep(220);
+      aiAct(unit);
+      updateIntelFromContact();
+      updateHudCounts();
+      if (checkWinLoseEarly()) return;
+    }
+    await sleep(180);
+  }
 }
 
 function checkWinLoseEarly() {
@@ -1016,50 +1216,54 @@ function checkWinLoseEarly() {
 }
 
 function aiAct(unit) {
-  // Try attack in place first
+  updateIntelFromContact();
+  const known = knownEnemies(unit.faction);
+
+  // Only attack targets this army has discovered
   let targets = [...getAttackTargets(unit)].map((k) => {
     const [x, z] = k.split(',').map(Number);
     return unitAt(x, z);
-  }).filter(Boolean);
+  }).filter((t) => t && known.some((k) => k.id === t.id));
 
   if (targets.length) {
-    const players = targets.filter((t) => t.faction === 'player');
-    const pool = players.length ? players : targets;
-    pool.sort((a, b) => a.hp - b.hp);
-    doAttackAI(unit, pool[0]);
+    targets.sort((a, b) => a.hp - b.hp);
+    doAttackAI(unit, targets[0]);
     return;
   }
 
-  // Move toward nearest player unit
-  const players = units.filter((u) => u.faction === 'player' && u.hp > 0);
-  let goalX = Math.floor(GRID / 2);
-  let goalZ = Math.floor(GRID / 2);
-  if (players.length) {
+  const reach = bfsReachable(unit.x, unit.z, unit.def.move, unit);
+  let goalX, goalZ;
+  if (known.length) {
     let best = null, bestD = Infinity;
-    for (const p of players) {
-      const d = manhattan(unit.x, unit.z, p.x, p.z);
+    for (const p of known) {
+      const d = chebyshev(unit.x, unit.z, p.x, p.z);
       if (d < bestD) { bestD = d; best = p; }
     }
-    if (best) { goalX = best.x; goalZ = best.z; }
+    goalX = best.x; goalZ = best.z;
+  } else {
+    // Scout: wander toward a random board landmark (no omniscient chase)
+    goalX = Math.floor(Math.random() * GRID);
+    goalZ = Math.floor(Math.random() * GRID);
   }
 
-  const reach = bfsReachable(unit.x, unit.z, unit.def.move, unit);
   let bestPos = null;
   let bestScore = Infinity;
-
-  // Prefer tiles that enable attack next
   for (const k of reach) {
     const [x, z] = k.split(',').map(Number);
-    // Simulate position
     const ox = unit.x, oz = unit.z;
     unit.x = x; unit.z = z;
-    const canHit = getAttackTargets(unit).size > 0;
+    updateIntelFromContact();
+    const knownNow = knownEnemies(unit.faction);
+    const hit = [...getAttackTargets(unit)].map((kk) => {
+      const [tx, tz] = kk.split(',').map(Number);
+      return unitAt(tx, tz);
+    }).filter((t) => t && knownNow.some((kn) => kn.id === t.id));
     unit.x = ox; unit.z = oz;
-    const distGoal = manhattan(x, z, goalX, goalZ);
-    const score = (canHit ? -100 : 0) + distGoal;
+    const distGoal = chebyshev(x, z, goalX, goalZ);
+    const score = (hit.length ? -100 : 0) + distGoal + Math.random() * 0.3;
     if (score < bestScore) {
       bestScore = score;
-      bestPos = { x, z, canHit };
+      bestPos = { x, z };
     }
   }
 
@@ -1068,34 +1272,38 @@ function aiAct(unit) {
     unit.z = bestPos.z;
     unit.moved = true;
     const p = worldPos(bestPos.x, bestPos.z);
-    unit.mesh.position.set(p.x, 0, p.z);
+    unit.mesh.position.set(p.x, unitWorldY(bestPos.x, bestPos.z), p.z);
+    updateIntelFromContact();
 
+    const known2 = knownEnemies(unit.faction);
     targets = [...getAttackTargets(unit)].map((k) => {
       const [x, z] = k.split(',').map(Number);
       return unitAt(x, z);
-    }).filter(Boolean);
+    }).filter((t) => t && known2.some((kn) => kn.id === t.id));
     if (targets.length) {
-      const players2 = targets.filter((t) => t.faction === 'player');
-      const pool2 = players2.length ? players2 : targets;
-      pool2.sort((a, b) => a.hp - b.hp);
-      doAttackAI(unit, pool2[0]);
+      targets.sort((a, b) => a.hp - b.hp);
+      doAttackAI(unit, targets[0]);
     }
   }
 }
 
 function doAttackAI(attacker, defender) {
-  const dmg = attacker.def.atk + Math.floor(Math.random() * 2);
+  const { mult, notes } = attackMultiplier(attacker, defender);
+  const raw = attacker.def.atk + Math.floor(Math.random() * 2);
+  const dmg = Math.max(1, Math.round(raw * mult));
   defender.hp -= dmg;
   attacker.attacked = true;
   attacker.moved = true;
   updateHpBar(defender);
   pulseMesh(defender.mesh);
   const armyName = (ARMY_COLORS[attacker.faction] || {}).name || 'Enemy';
-  toast(`${armyName} ${attacker.def.name} hits for ${dmg}`, 900);
+  const bonus = notes.length ? ` (${notes.join(', ')})` : '';
+  toast(`${armyName} ${attacker.def.name} hits for ${dmg}${bonus}`, 900);
   if (defender.hp <= 0) {
     defender.hp = 0;
     unitsGroup.remove(defender.mesh);
   }
+  updateIntelFromContact();
 }
 
 function startGame() {
@@ -1103,6 +1311,7 @@ function startGame() {
   setHudVisible(true);
   buildBoard();
   spawnUnits();
+  resetIntel();
   selected = null;
   clearHighlights();
   turn = 1;
