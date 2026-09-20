@@ -208,6 +208,14 @@ button.ghost {
 .pill .label { color: var(--muted); font-weight: 500; margin-right: 6px; }
 .pill.player { border-color: rgba(58, 215, 255, 0.55); }
 .pill.enemy { border-color: rgba(255, 122, 58, 0.55); }
+.pill.muted {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 6px 10px;
+  opacity: 0.9;
+  border-color: rgba(90, 160, 220, 0.22);
+}
 
 #bottom-hud {
   position: absolute;

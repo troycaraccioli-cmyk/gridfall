@@ -24,6 +24,7 @@
       <div class="pill" id="turn-pill"><span class="label">Turn</span><span id="turn-num">1</span></div>
       <div class="pill player" id="phase-pill">Your turn</div>
       <div class="pill" id="score-pill"><span class="label">You</span><span id="player-count">0</span> · <span class="label">AI</span><span id="enemy-count">0</span></div>
+      <div class="pill muted" id="build-chip" title="Build ID">gridfall-v13</div>
     </div>
   </div>
 
@@ -75,7 +76,7 @@
         <li><strong>Fog of war (AI)</strong> — rival armies do not know your positions until a unit is within 1 tile; they scout separately and will not all pile on at once from the start.</li>
         <li><strong>Map</strong> — 16×16 grid; cyan starts SW; Ember SE, Ash NW, Cinder NE.</li>
       </ol>
-      <p class="tagline" style="margin-top:0.75rem;font-size:0.85rem;">After an update: hard-refresh or clear site data so the service worker picks up the new cache.</p>
+      <p class="tagline" style="margin-top:0.75rem;font-size:0.85rem;">After an update: hard-refresh or clear site data so the service worker picks up the new cache. URL <code>?fresh=1</code> forces update toast.</p>
       <div class="units-key">
         <div class="row"><span class="dot inf"></span><div><strong style="color:var(--text)">Infantry</strong> — Move 3, melee attack 1 tile, balanced.</div></div>
         <div class="row"><span class="dot rng"></span><div><strong style="color:var(--text)">Archer</strong> — Move 2, attack up to 3 tiles (cannot shoot adjacent).</div></div>
