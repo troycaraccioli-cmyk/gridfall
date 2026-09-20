@@ -11,7 +11,7 @@ const HALF = ((GRID - 1) * TILE) / 2;
 
 const UNIT_DEFS = {
   infantry: { name: 'Infantry', move: 3, hp: 10, atk: 4, range: 1, minRange: 1, colorPlayer: 0x3ad7ff, colorEnemy: 0xff7a3a, shape: 'knight' },
-  archer:   { name: 'Archer',   move: 2, hp: 7,  atk: 3, range: 1, minRange: 1, losRange: 3, colorPlayer: 0x7dffb0, colorEnemy: 0xffaa66, shape: 'archer' },
+  archer:   { name: 'Archer',   move: 2, hp: 7,  atk: 3, range: 3, minRange: 2, colorPlayer: 0x7dffb0, colorEnemy: 0xffaa66, shape: 'archer' },
   bastion:  { name: 'Bastion',  move: 2, hp: 16, atk: 5, range: 1, minRange: 1, colorPlayer: 0x8ab4ff, colorEnemy: 0xff5577, shape: 'carriage' },
 };
 
@@ -27,7 +27,7 @@ function isEnemy(u) { return u.faction !== 'player'; }
 
 const $ = (id) => document.getElementById(id);
 
-const BUILD_ID = 'gridfall-v13';
+const BUILD_ID = 'gridfall-v14';
 
 const ui = {
   title: $('title-screen'),
@@ -1061,9 +1061,10 @@ function getAttackTargets(unit) {
     if (e.hp <= 0 || e.faction === unit.faction) continue;
     const d = chebyshev(unit.x, unit.z, e.x, e.z);
     if (unit.type === 'archer') {
-      const maxR = unit.def.losRange || 3;
-      if (d <= 1) set.add(key(e.x, e.z));
-      else if (d <= maxR && losClear(unit.x, unit.z, e.x, e.z, unit.faction)) set.add(key(e.x, e.z));
+      // Archer: Chebyshev 2–3 only, LOS required on every shot (no adjacent)
+      if (d < (unit.def.minRange || 2) || d > (unit.def.range || 3)) continue;
+      if (!losClear(unit.x, unit.z, e.x, e.z, unit.faction)) continue;
+      set.add(key(e.x, e.z));
     } else {
       // Melee: any adjacent tile including diagonals
       if (d >= (unit.def.minRange || 1) && d <= (unit.def.range || 1)) set.add(key(e.x, e.z));
@@ -1527,7 +1528,7 @@ async function runAI() {
     factionScoutGoal[fac] = rollFactionScoutGoal(fac);
     resetUnitActions(fac);
     const squad = units.filter((u) => u.faction === fac && u.hp > 0);
-    squad.sort((a, b) => a.def.range - b.def.range);
+    squad.sort((a, b) => b.def.range - a.def.range);
     for (const unit of squad) {
       if (phase === 'ended') return;
       await sleep(220);
@@ -1577,6 +1578,7 @@ function aiAct(unit) {
   }
 
   const mem = factionMemory[fac] || new Map();
+  const hunting = !!hunt;
   let bestPos = null;
   let bestScore = Infinity;
   for (const k of reach) {
@@ -1591,7 +1593,10 @@ function aiAct(unit) {
     });
     unit.x = ox; unit.z = oz;
     const distGoal = chebyshev(x, z, goalX, goalZ);
-    const score = (hit ? ATTACK_BONUS : 0) + distGoal + Math.random() * GOAL_NOISE;
+    // Archers hunting: prefer stop-short at 2–3 vs parking on goal footprint
+    let archerBias = 0;
+    if (unit.type === 'archer' && hunting && distGoal <= 1) archerBias = 1.5;
+    const score = (hit ? ATTACK_BONUS : 0) + distGoal + archerBias + Math.random() * GOAL_NOISE;
     if (score < bestScore) {
       bestScore = score;
       bestPos = { x, z };
