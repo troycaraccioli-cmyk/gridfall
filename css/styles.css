@@ -221,7 +221,7 @@ button.ghost {
 
 #bottom-hud .panel {
   pointer-events: auto;
-  background: rgba(12, 20, 36, 0.5); /* 50% transparent */
+  background: rgba(12, 20, 36, 0.25); /* 75% transparent */
   border: 1px solid rgba(90, 160, 220, 0.3);
   border-radius: 16px;
   padding: 12px 14px;
@@ -289,10 +289,10 @@ button.ghost {
 }
 
 
-/* 50% transparent control chrome */
+/* HUD translucency: panels/buttons 75% transparent; label text 25% transparent */
 #bottom-hud .panel,
 #top-hud .pill {
-  background: rgba(12, 20, 36, 0.5) !important;
+  background: rgba(12, 20, 36, 0.25) !important;
 }
 
 #bottom-hud button,
@@ -301,10 +301,17 @@ button.ghost {
 button.primary,
 button.ghost,
 .btn-row button {
-  background: rgba(26, 42, 68, 0.5) !important;
-  border-color: rgba(58, 85, 122, 0.55);
+  background: rgba(26, 42, 68, 0.25) !important;
+  border-color: rgba(58, 85, 122, 0.4);
+  color: rgba(232, 240, 255, 0.75) !important;
 }
 
 button.primary {
-  background: linear-gradient(180deg, rgba(36, 90, 140, 0.5), rgba(26, 58, 100, 0.5)) !important;
+  background: linear-gradient(180deg, rgba(36, 90, 140, 0.25), rgba(26, 58, 100, 0.25)) !important;
+}
+
+#bottom-hud .panel,
+#unit-info,
+#top-hud .pill {
+  color: rgba(232, 240, 255, 0.75);
 }

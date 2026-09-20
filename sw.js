@@ -1,5 +1,5 @@
 /* Gridfall service worker — network-first for shell so Play updates land */
-const CACHE = 'gridfall-v6';
+const CACHE = 'gridfall-v7';
 const ASSETS = [
   './',
   './index.html',

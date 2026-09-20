@@ -153,7 +153,8 @@ function initThree() {
   pointer = new THREE.Vector2();
 
   window.addEventListener('resize', onResize);
-  canvas.addEventListener('pointerdown', onPointerDown);
+  canvas.style.touchAction = 'none';
+  canvas.addEventListener('pointerdown', onPointerDown, { capture: true });
 
   animate();
 }
@@ -847,7 +848,7 @@ function spawnUnits() {
     units.push(u);
     updateHpBar(u);
   }
-  resetIntel();  resetIntel();
+  resetIntel();
 }
 
 
@@ -1010,29 +1011,63 @@ function screenToNDC(e) {
   pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 }
 
-let pointerDownAt = null;
-let pointerMoved = false;
+// Tap vs orbit/pan: hold OrbitControls until a drag is confirmed so single-finger taps select units.
+const activePointers = new Set();
+let tapGesture = null; // { id, x, y, t, dragged }
 
 function onPointerDown(e) {
+  activePointers.add(e.pointerId);
+
+  // Two+ fingers → pan/zoom; cancel any pending tap and restore controls
+  if (activePointers.size > 1) {
+    tapGesture = null;
+    controls.enableRotate = true;
+    controls.enablePan = true;
+    return;
+  }
+
   if (!gameActive || phase !== 'player') return;
-  pointerDownAt = { x: e.clientX, y: e.clientY, t: Date.now() };
-  pointerMoved = false;
+  if (e.button !== undefined && e.button !== 0) return;
+
+  // Single finger/stylus/mouse: freeze orbit until we know it's a drag
+  tapGesture = { id: e.pointerId, x: e.clientX, y: e.clientY, t: Date.now(), dragged: false };
+  controls.enableRotate = false;
+  controls.enablePan = false;
+
+  const move = (ev) => {
+    if (!tapGesture || ev.pointerId !== tapGesture.id) return;
+    const dist = Math.hypot(ev.clientX - tapGesture.x, ev.clientY - tapGesture.y);
+    // Touch jitter is larger on iPad — require a clear drag before orbiting
+    if (dist > 22) {
+      tapGesture.dragged = true;
+      controls.enableRotate = true;
+      // pan stays off for one-finger; two-finger path re-enables it
+    }
+  };
   const up = (ev) => {
     window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
     window.removeEventListener('pointermove', move);
-    if (!pointerDownAt) return;
-    const dx = ev.clientX - pointerDownAt.x;
-    const dy = ev.clientY - pointerDownAt.y;
-    const dt = Date.now() - pointerDownAt.t;
-    pointerDownAt = null;
-    if (pointerMoved || Math.hypot(dx, dy) > 12 || dt > 500) return; // treat as orbit
-    handleTap(ev);
-  };
-  const move = (ev) => {
-    if (!pointerDownAt) return;
-    if (Math.hypot(ev.clientX - pointerDownAt.x, ev.clientY - pointerDownAt.y) > 12) pointerMoved = true;
+    activePointers.delete(ev.pointerId);
+
+    const gest = tapGesture;
+    if (gest && ev.pointerId === gest.id) {
+      tapGesture = null;
+      const dt = Date.now() - gest.t;
+      const dist = Math.hypot(ev.clientX - gest.x, ev.clientY - gest.y);
+      if (!gest.dragged && dist <= 22 && dt < 750 && activePointers.size === 0) {
+        handleTap(ev);
+      }
+    }
+
+    if (activePointers.size === 0) {
+      controls.enableRotate = true;
+      controls.enablePan = true;
+      tapGesture = null;
+    }
   };
   window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
   window.addEventListener('pointermove', move);
 }
 
