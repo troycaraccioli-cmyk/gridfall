@@ -58,6 +58,35 @@ let gameActive = false;
 let toastTimer = null;
 /** Per-faction set of unit ids that faction has discovered (Chebyshev ≤ 1 contact). */
 let factionIntel = { player: new Set(), ember: new Set(), ash: new Set(), cinder: new Set() };
+/** Last-known contact memory (no live tracking for movement goals). */
+let factionMemory = {
+  player: new Map(),
+  ember: new Map(),
+  ash: new Map(),
+  cinder: new Map(),
+};
+/** Shared blind-scout waypoint rolled once per faction per AI phase. */
+let factionScoutGoal = { player: null, ember: null, ash: null, cinder: null };
+
+const CONTACT_RANGE = 1;
+const MEMORY_TTL_TURNS = 5;
+const CENTER = { x: 7, z: 7 };
+const BLIND_JITTER = 1;
+const ATTACK_BONUS = -100;
+const GOAL_NOISE = 0.3;
+const SOFT_CAP_HUNTERS = 3;
+const SPAWN_LANDMARKS = {
+  player: { x: 2, z: 2 },
+  ember: { x: 13, z: 2 },
+  ash: { x: 2, z: 13 },
+  cinder: { x: 13, z: 13 },
+};
+const SPAWN_CORNERS = {
+  player: [0, 0],
+  ember: [GRID - 1, 0],
+  ash: [0, GRID - 1],
+  cinder: [GRID - 1, GRID - 1],
+};
 const HEIGHT_MIN = 0;
 const HEIGHT_MAX = 0.55; // visual elevation span
 const HEIGHT_STEP_MAX = (HEIGHT_MAX - HEIGHT_MIN) * 0.02; // ≤2% of full range per adjoining tile
@@ -307,8 +336,19 @@ function losClear(x0, z0, x1, z1, faction) {
   return true;
 }
 
+function emptyFactionMaps() {
+  return {
+    player: new Map(),
+    ember: new Map(),
+    ash: new Map(),
+    cinder: new Map(),
+  };
+}
+
 function resetIntel() {
   factionIntel = { player: new Set(), ember: new Set(), ash: new Set(), cinder: new Set() };
+  factionMemory = emptyFactionMaps();
+  factionScoutGoal = { player: null, ember: null, ash: null, cinder: null };
   // Own units always known to self
   for (const u of units) {
     if (u.hp <= 0) continue;
@@ -324,19 +364,132 @@ function updateIntelFromContact() {
     for (let j = i + 1; j < live.length; j++) {
       const a = live[i], b = live[j];
       if (a.faction === b.faction) continue;
-      if (chebyshev(a.x, a.z, b.x, b.z) <= 1) {
+      if (chebyshev(a.x, a.z, b.x, b.z) <= CONTACT_RANGE) {
         if (!factionIntel[a.faction]) factionIntel[a.faction] = new Set();
         if (!factionIntel[b.faction]) factionIntel[b.faction] = new Set();
         factionIntel[a.faction].add(b.id);
         factionIntel[b.faction].add(a.id);
+        if (!factionMemory[a.faction]) factionMemory[a.faction] = new Map();
+        if (!factionMemory[b.faction]) factionMemory[b.faction] = new Map();
+        factionMemory[a.faction].set(b.id, { id: b.id, x: b.x, z: b.z, turn, aliveGuess: true });
+        factionMemory[b.faction].set(a.id, { id: a.id, x: a.x, z: a.z, turn, aliveGuess: true });
       }
     }
   }
 }
 
+/** Live known enemies — do NOT use for movement goals (last-known memory only). */
 function knownEnemies(faction) {
   const known = factionIntel[faction] || new Set();
   return units.filter((u) => u.hp > 0 && u.faction !== faction && known.has(u.id));
+}
+
+function pruneFactionMemory(faction) {
+  const mem = factionMemory[faction];
+  if (!mem) return;
+  for (const [id, entry] of [...mem.entries()]) {
+    const u = units.find((x) => x.id === id);
+    if (!u || u.hp <= 0) {
+      mem.delete(id);
+      continue;
+    }
+    if (turn - entry.turn > MEMORY_TTL_TURNS) mem.delete(id);
+  }
+}
+
+function knownContacts(faction) {
+  const mem = factionMemory[faction];
+  if (!mem) return [];
+  const out = [];
+  for (const entry of mem.values()) {
+    const u = units.find((x) => x.id === entry.id);
+    if (u && u.hp > 0) out.push(entry);
+  }
+  return out;
+}
+
+function pickSoftExploreTile(faction) {
+  const own = SPAWN_CORNERS[faction] || [0, 0];
+  const mid = Math.floor(GRID / 2);
+  const wantHighX = own[0] < mid;
+  const wantHighZ = own[1] < mid;
+  for (let t = 0; t < 40; t++) {
+    const x = wantHighX
+      ? mid + Math.floor(Math.random() * (GRID - mid))
+      : Math.floor(Math.random() * mid);
+    const z = wantHighZ
+      ? mid + Math.floor(Math.random() * (GRID - mid))
+      : Math.floor(Math.random() * mid);
+    const tile = tileAt(x, z);
+    if (tile && !tile.obstacle) return { x, z };
+  }
+  return { x: CENTER.x, z: CENTER.z };
+}
+
+function applyBlindJitter(lx, lz) {
+  for (let t = 0; t < 5; t++) {
+    const ox = Math.floor(Math.random() * (BLIND_JITTER * 2 + 1)) - BLIND_JITTER;
+    const oz = Math.floor(Math.random() * (BLIND_JITTER * 2 + 1)) - BLIND_JITTER;
+    const x = Math.max(0, Math.min(GRID - 1, lx + ox));
+    const z = Math.max(0, Math.min(GRID - 1, lz + oz));
+    const tile = tileAt(x, z);
+    if (tile && !tile.obstacle) return { x, z };
+  }
+  return { x: lx, z: lz };
+}
+
+function rollFactionScoutGoal(faction) {
+  const r = Math.random();
+  let landmark;
+  if (r < 0.35) {
+    landmark = { x: CENTER.x, z: CENTER.z };
+  } else if (r < 0.35 + 0.55) {
+    const enemies = ['player', 'ember', 'ash', 'cinder'].filter((f) => f !== faction);
+    const pick = enemies[Math.floor(Math.random() * enemies.length)];
+    landmark = { ...(SPAWN_LANDMARKS[pick] || CENTER) };
+  } else {
+    landmark = pickSoftExploreTile(faction);
+  }
+  const jittered = applyBlindJitter(landmark.x, landmark.z);
+  return { x: jittered.x, z: jittered.z, turn };
+}
+
+/**
+ * Soft-cap hunt goal (§7): among contacts sorted for this unit, use the first
+ * contact for which this unit is among the SOFT_CAP_HUNTERS closest allies.
+ */
+function contactGoalForUnit(faction, unit, contacts) {
+  if (!contacts.length) return null;
+  const sorted = [...contacts].sort((a, b) => {
+    const da = chebyshev(unit.x, unit.z, a.x, a.z);
+    const db = chebyshev(unit.x, unit.z, b.x, b.z);
+    if (da !== db) return da - db;
+    if (b.turn !== a.turn) return b.turn - a.turn;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  const allies = units.filter((u) => u.faction === faction && u.hp > 0);
+  for (const c of sorted) {
+    const ranked = [...allies].sort((a, b) => {
+      const da = chebyshev(a.x, a.z, c.x, c.z);
+      const db = chebyshev(b.x, b.z, c.x, c.z);
+      if (da !== db) return da - db;
+      return String(a.id).localeCompare(String(b.id));
+    });
+    const idx = ranked.findIndex((u) => u.id === unit.id);
+    if (idx >= 0 && idx < SOFT_CAP_HUNTERS) {
+      return { x: c.x, z: c.z, contactId: c.id };
+    }
+  }
+  return null;
+}
+
+function attackTargetsFromMemory(unit) {
+  const mem = factionMemory[unit.faction];
+  if (!mem || mem.size === 0) return [];
+  return [...getAttackTargets(unit)].map((k) => {
+    const [x, z] = k.split(',').map(Number);
+    return unitAt(x, z);
+  }).filter((t) => t && mem.has(t.id));
 }
 
 
@@ -1260,6 +1413,8 @@ async function runAI() {
     [factions[i], factions[j]] = [factions[j], factions[i]];
   }
   for (const fac of factions) {
+    pruneFactionMemory(fac);
+    factionScoutGoal[fac] = rollFactionScoutGoal(fac);
     resetUnitActions(fac);
     const squad = units.filter((u) => u.faction === fac && u.hp > 0);
     squad.sort((a, b) => a.def.range - b.def.range);
@@ -1284,15 +1439,12 @@ function checkWinLoseEarly() {
 }
 
 function aiAct(unit) {
+  // Real act start — committed contact snapshot OK here
   updateIntelFromContact();
-  const known = knownEnemies(unit.faction);
+  const fac = unit.faction;
 
-  // Only attack targets this army has discovered
-  let targets = [...getAttackTargets(unit)].map((k) => {
-    const [x, z] = k.split(',').map(Number);
-    return unitAt(x, z);
-  }).filter((t) => t && known.some((k) => k.id === t.id));
-
+  // P0 — Attack now (memory id ∩ mechanical attack targets); lowest HP
+  let targets = attackTargetsFromMemory(unit);
   if (targets.length) {
     targets.sort((a, b) => a.hp - b.hp);
     doAttackAI(unit, targets[0]);
@@ -1300,35 +1452,36 @@ function aiAct(unit) {
   }
 
   const reach = bfsReachable(unit.x, unit.z, unit.def.move, unit);
+  const contacts = knownContacts(fac);
   let goalX, goalZ;
-  if (known.length) {
-    let best = null, bestD = Infinity;
-    for (const p of known) {
-      const d = chebyshev(unit.x, unit.z, p.x, p.z);
-      if (d < bestD) { bestD = d; best = p; }
-    }
-    goalX = best.x; goalZ = best.z;
+  const hunt = contactGoalForUnit(fac, unit, contacts);
+  if (hunt) {
+    // P1 — Hunt last-known (soft-capped)
+    goalX = hunt.x;
+    goalZ = hunt.z;
   } else {
-    // Scout: wander toward a random board landmark (no omniscient chase)
-    goalX = Math.floor(Math.random() * GRID);
-    goalZ = Math.floor(Math.random() * GRID);
+    // P2 — Blind scout / overflow hunters: shared faction scout goal
+    if (!factionScoutGoal[fac]) factionScoutGoal[fac] = rollFactionScoutGoal(fac);
+    goalX = factionScoutGoal[fac].x;
+    goalZ = factionScoutGoal[fac].z;
   }
 
+  const mem = factionMemory[fac] || new Map();
   let bestPos = null;
   let bestScore = Infinity;
   for (const k of reach) {
     const [x, z] = k.split(',').map(Number);
     const ox = unit.x, oz = unit.z;
     unit.x = x; unit.z = z;
-    updateIntelFromContact();
-    const knownNow = knownEnemies(unit.faction);
-    const hit = [...getAttackTargets(unit)].map((kk) => {
+    // Pure scoring — never mutate intel from hypothetical positions
+    const hit = [...getAttackTargets(unit)].some((kk) => {
       const [tx, tz] = kk.split(',').map(Number);
-      return unitAt(tx, tz);
-    }).filter((t) => t && knownNow.some((kn) => kn.id === t.id));
+      const t = unitAt(tx, tz);
+      return t && mem.has(t.id);
+    });
     unit.x = ox; unit.z = oz;
     const distGoal = chebyshev(x, z, goalX, goalZ);
-    const score = (hit.length ? -100 : 0) + distGoal + Math.random() * 0.3;
+    const score = (hit ? ATTACK_BONUS : 0) + distGoal + Math.random() * GOAL_NOISE;
     if (score < bestScore) {
       bestScore = score;
       bestPos = { x, z };
@@ -1343,11 +1496,7 @@ function aiAct(unit) {
     unit.mesh.position.set(p.x, unitWorldY(bestPos.x, bestPos.z), p.z);
     updateIntelFromContact();
 
-    const known2 = knownEnemies(unit.faction);
-    targets = [...getAttackTargets(unit)].map((k) => {
-      const [x, z] = k.split(',').map(Number);
-      return unitAt(x, z);
-    }).filter((t) => t && known2.some((kn) => kn.id === t.id));
+    targets = attackTargetsFromMemory(unit);
     if (targets.length) {
       targets.sort((a, b) => a.hp - b.hp);
       doAttackAI(unit, targets[0]);
