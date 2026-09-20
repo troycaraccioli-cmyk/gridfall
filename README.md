@@ -21,7 +21,7 @@ A Safari / iPad–friendly **Progressive Web App**: a short 3D turn-based strate
 
 **Camera:** drag with one finger to orbit; pinch to zoom.
 
-**After an update:** hard-refresh the page, or clear site data for this origin, so the service worker picks up the new cache.
+**After an update:** hard-refresh the page, or clear site data for this origin, so the service worker picks up the new cache. URL `?fresh=1` forces update toast.
 
 ## Run locally
 

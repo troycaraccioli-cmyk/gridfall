@@ -27,7 +27,7 @@ function isEnemy(u) { return u.faction !== 'player'; }
 
 const $ = (id) => document.getElementById(id);
 
-const BUILD_ID = 'gridfall-v12';
+const BUILD_ID = 'gridfall-v13';
 
 const ui = {
   title: $('title-screen'),
@@ -38,6 +38,7 @@ const ui = {
   hint: $('camera-hint'),
   toast: $('status-toast'),
   buildBanner: $('build-banner'),
+  buildChip: $('build-chip'),
   turnNum: $('turn-num'),
   phase: $('phase-pill'),
   playerCount: $('player-count'),
@@ -1700,8 +1701,23 @@ function promptSwUpdate() {
   toast('New version ready — hard-refresh or clear Safari site data', 5200);
 }
 
+/** Persistent version proof in battle HUD (not session-gated / not timed). */
+if (ui.buildChip) ui.buildChip.textContent = BUILD_ID;
+
+/** QA: ?fresh=1 (also ?swtoast=1 / ?swcheck=1) clears banner gate and forces toast once. */
+function qaForceVersionProof() {
+  let params;
+  try { params = new URLSearchParams(location.search); } catch (_) { return false; }
+  if (!(params.has('fresh') || params.has('swtoast') || params.has('swcheck'))) return false;
+  try { sessionStorage.removeItem('gf-build-shown'); } catch (_) { /* private mode */ }
+  showBuildBannerOnce();
+  promptSwUpdate();
+  return true;
+}
+
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
+    const qaForced = qaForceVersionProof();
     navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
       .then((reg) => {
         reg.update().catch(() => {});
@@ -1715,7 +1731,7 @@ if ('serviceWorker' in navigator) {
             }
           });
         });
-        showBuildBannerOnce();
+        if (!qaForced) showBuildBannerOnce();
       })
       .catch(() => {});
 
@@ -1726,4 +1742,6 @@ if ('serviceWorker' in navigator) {
       toast('Updated — hard-refresh if the board looks stale', 4200);
     });
   });
+} else {
+  window.addEventListener('load', () => { qaForceVersionProof(); });
 }
