@@ -27,6 +27,8 @@ function isEnemy(u) { return u.faction !== 'player'; }
 
 const $ = (id) => document.getElementById(id);
 
+const BUILD_ID = 'gridfall-v12';
+
 const ui = {
   title: $('title-screen'),
   howto: $('howto-screen'),
@@ -35,6 +37,7 @@ const ui = {
   bottom: $('bottom-hud'),
   hint: $('camera-hint'),
   toast: $('status-toast'),
+  buildBanner: $('build-banner'),
   turnNum: $('turn-num'),
   phase: $('phase-pill'),
   playerCount: $('player-count'),
@@ -1678,8 +1681,49 @@ spawnUnits();
 setHudVisible(false);
 showOverlay(ui.title);
 
+function showBuildBannerOnce() {
+  if (!ui.buildBanner) return;
+  try {
+    if (sessionStorage.getItem('gf-build-shown') === BUILD_ID) return;
+    sessionStorage.setItem('gf-build-shown', BUILD_ID);
+  } catch (_) { /* private mode */ }
+  ui.buildBanner.textContent = BUILD_ID;
+  ui.buildBanner.classList.remove('hidden');
+  ui.buildBanner.classList.add('show');
+  setTimeout(() => {
+    ui.buildBanner.classList.add('hidden');
+    ui.buildBanner.classList.remove('show');
+  }, 3200);
+}
+
+function promptSwUpdate() {
+  toast('New version ready — hard-refresh or clear Safari site data', 5200);
+}
+
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      .then((reg) => {
+        reg.update().catch(() => {});
+        if (reg.waiting) promptSwUpdate();
+        reg.addEventListener('updatefound', () => {
+          const nw = reg.installing;
+          if (!nw) return;
+          nw.addEventListener('statechange', () => {
+            if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+              promptSwUpdate();
+            }
+          });
+        });
+        showBuildBannerOnce();
+      })
+      .catch(() => {});
+
+    let refreshing = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (refreshing) return;
+      refreshing = true;
+      toast('Updated — hard-refresh if the board looks stale', 4200);
+    });
   });
 }
