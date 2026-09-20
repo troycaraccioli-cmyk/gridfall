@@ -71,7 +71,9 @@
         <li><strong>Facing</strong> — strike any of the 8 neighboring tiles (front, sides, back, diagonals).</li>
         <li><strong>Archers</strong> — shoot adjacent by default; range extends up to 3 through empty tiles or over friendlies (not through enemies/rocks).</li>
         <li><strong>Fog of war (AI)</strong> — rival armies do not know your positions until a unit is within 1 tile; they scout separately and will not all pile on at once from the start.</li>
+        <li><strong>Map</strong> — 16×16 grid; cyan starts SW; Ember SE, Ash NW, Cinder NE.</li>
       </ol>
+      <p class="tagline" style="margin-top:0.75rem;font-size:0.85rem;">After an update: hard-refresh or clear site data so the service worker picks up the new cache.</p>
       <div class="units-key">
         <div class="row"><span class="dot inf"></span><div><strong style="color:var(--text)">Infantry</strong> — Move 3, melee attack 1 tile, balanced.</div></div>
         <div class="row"><span class="dot rng"></span><div><strong style="color:var(--text)">Archer</strong> — Move 2, attack up to 3 tiles (cannot shoot adjacent).</div></div>
@@ -88,7 +90,7 @@
   <div id="end-screen" class="overlay hidden">
     <div class="card">
       <h1 id="end-title" style="margin-top:0;color:var(--gold);">Victory</h1>
-      <p id="end-msg" class="tagline">You cleared the Ember forces.</p>
+      <p id="end-msg" class="tagline">You wiped out the rival armies.</p>
       <div class="btn-row">
         <button type="button" id="btn-again" class="primary">Play Again</button>
         <button type="button" id="btn-end-title" class="ghost">Title</button>

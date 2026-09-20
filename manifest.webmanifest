@@ -1,7 +1,7 @@
 {
   "name": "Gridfall",
   "short_name": "Gridfall",
-  "description": "3D turn-based strategy on a tabletop grid. Command cyan forces against the Ember AI.",
+  "description": "3D turn-based strategy on a 16×16 grid. Command cyan forces against Ember, Ash, and Cinder. Wipe out all rivals to win.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
