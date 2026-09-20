@@ -1,5 +1,5 @@
-/* Gridfall demo service worker — network-first so Play updates land quickly */
-const CACHE = 'gridfall-v2';
+/* Gridfall service worker — network-first for shell so Play updates land */
+const CACHE = 'gridfall-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -13,7 +13,7 @@ const ASSETS = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE).then((cache) => cache.addAll(ASSETS).catch(() => {})).then(() => self.skipWaiting())
   );
 });
 
@@ -28,14 +28,14 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
-  const isShell = url.origin === self.location.origin && (
-    url.pathname.endsWith('/js/main.js') ||
-    url.pathname.endsWith('/index.html') ||
-    url.pathname.endsWith('/sw.js') ||
-    url.pathname.endsWith('/gridfall/') ||
-    url.pathname.endsWith('/gridfall')
-  );
-  if (isShell || event.request.mode === 'navigate') {
+  const path = url.pathname;
+  const isShell =
+    event.request.mode === 'navigate' ||
+    path.endsWith('/js/main.js') ||
+    path.endsWith('/index.html') ||
+    path.endsWith('/sw.js') ||
+    path.endsWith('/css/styles.css');
+  if (isShell) {
     event.respondWith(
       fetch(event.request)
         .then((res) => {
@@ -43,7 +43,7 @@ self.addEventListener('fetch', (event) => {
           caches.open(CACHE).then((cache) => cache.put(event.request, copy)).catch(() => {});
           return res;
         })
-        .catch(() => caches.match(event.request))
+        .catch(() => caches.match(event.request).then((c) => c || caches.match('./index.html')))
     );
     return;
   }

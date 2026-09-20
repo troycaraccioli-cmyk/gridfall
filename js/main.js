@@ -46,7 +46,7 @@ const ui = {
 };
 
 let scene, camera, renderer, controls, raycaster, pointer;
-let boardGroup, highlightGroup, unitsGroup, crystalMesh;
+let boardGroup, highlightGroup, unitsGroup;
 let tiles = []; // {x,z,mesh,obstacle}
 let units = [];
 let selected = null;
@@ -164,19 +164,15 @@ function buildBoard() {
   while (boardGroup.children.length) boardGroup.remove(boardGroup.children[0]);
   tiles = [];
 
-  // 4× prior obstacle count (5 → 20), keep spawn corners + crystal clear
+  // 20 rocks; keep all four spawn corners clear (no center objective)
   const obstacles = new Set();
-    // Even grids have no single center cell; use (N/2-1,N/2-1) and mark that tile gold.
-  const crystalX = Math.floor(GRID / 2) - 1;
-  const crystalZ = Math.floor(GRID / 2) - 1;
   const banned = new Set();
-  // Keep all four army corners + crystal clear of rocks
+  // Keep all four army corners clear of rocks
   for (let z = 0; z < 5; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
   for (let z = 0; z < 5; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
   for (let z = GRID - 5; z < GRID; z++) for (let x = 0; x < 5; x++) banned.add(key(x, z));
   for (let z = GRID - 5; z < GRID; z++) for (let x = GRID - 5; x < GRID; x++) banned.add(key(x, z));
-  banned.add(key(crystalX, crystalZ));
-  const candidates = [];
+    const candidates = [];
   for (let z = 0; z < GRID; z++) {
     for (let x = 0; x < GRID; x++) {
       if (!banned.has(key(x, z))) candidates.push([x, z]);
@@ -196,15 +192,12 @@ function buildBoard() {
   for (let z = 0; z < GRID; z++) {
     for (let x = 0; x < GRID; x++) {
       const isObs = obstacles.has(key(x, z));
-      const isCrystalTile = x === crystalX && z === crystalZ;
       const checker = (x + z) % 2 === 0;
       const geo = new THREE.BoxGeometry(TILE * 0.92, 0.18, TILE * 0.92);
       const mat = new THREE.MeshStandardMaterial({
-        color: isCrystalTile ? 0xc9a227 : (isObs ? 0x3a4558 : (checker ? 0x1e3a5f : 0x16304f)),
-        emissive: isCrystalTile ? 0x664400 : 0x000000,
-        emissiveIntensity: isCrystalTile ? 0.35 : 0,
+        color: isObs ? 0x3a4558 : (checker ? 0x1e3a5f : 0x16304f),
         roughness: 0.7,
-        metalness: isCrystalTile ? 0.35 : 0.15,
+        metalness: 0.15,
       });
       const mesh = new THREE.Mesh(geo, mat);
       const p = worldPos(x, z);
@@ -227,53 +220,6 @@ function buildBoard() {
     }
   }
 
-  // Objective crystal at board center (crystalX/Z set above with obstacles)
-  if (crystalMesh) {
-    scene.remove(crystalMesh);
-    crystalMesh = null;
-  }
-  const cp = worldPos(crystalX, crystalZ);
-  const crystal = new THREE.Mesh(
-    new THREE.OctahedronGeometry(0.42, 0),
-    new THREE.MeshStandardMaterial({
-      color: 0xffd266,
-      emissive: 0xaa7700,
-      emissiveIntensity: 0.55,
-      metalness: 0.4,
-      roughness: 0.25,
-    })
-  );
-  // Sit crystal exactly on the center tile's world position
-  crystal.position.set(cp.x, 0.55, cp.z);
-  crystal.castShadow = true;
-  crystal.userData = { type: 'crystal', x: crystalX, z: crystalZ };
-  scene.add(crystal);
-  crystalMesh = crystal;
-
-  // Gold pad under crystal so the capture tile is unmistakable
-  const pad = new THREE.Mesh(
-    new THREE.CylinderGeometry(TILE * 0.42, TILE * 0.42, 0.06, 24),
-    new THREE.MeshStandardMaterial({ color: 0xffd266, emissive: 0xaa7700, emissiveIntensity: 0.4, metalness: 0.5, roughness: 0.35 })
-  );
-  pad.position.set(cp.x, 0.16, cp.z);
-  pad.receiveShadow = true;
-  boardGroup.add(pad);
-  const padRing = new THREE.Mesh(
-    new THREE.RingGeometry(TILE * 0.38, TILE * 0.48, 32),
-    new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.85, side: THREE.DoubleSide })
-  );
-  padRing.rotation.x = -Math.PI / 2;
-  padRing.position.set(cp.x, 0.2, cp.z);
-  boardGroup.add(padRing);
-
-  // Soft glow ring
-  const glowRing = new THREE.Mesh(
-    new THREE.RingGeometry(0.5, 0.65, 32),
-    new THREE.MeshBasicMaterial({ color: 0xffd266, transparent: true, opacity: 0.35, side: THREE.DoubleSide })
-  );
-  glowRing.rotation.x = -Math.PI / 2;
-  glowRing.position.set(cp.x, 0.16, cp.z);
-  boardGroup.add(glowRing);
 }
 
 function makeArcherFigure(color) {
@@ -667,7 +613,7 @@ function spawnUnits() {
   while (unitsGroup.children.length) unitsGroup.remove(unitsGroup.children[0]);
   units = [];
 
-  // Four armies — one per corner (you = Cyan / SW). Each: 1 carriage, 2 knights, 2 archers.
+  // Four armies — one per corner (you = Cyan / SW). Each: 10 units (1 bastion, 5 infantry, 4 archers).
   const E = GRID - 1;
   const armyPattern = (faction, ox, oz, flipX, flipZ) => {
     const fx = (x) => (flipX ? ox - x : ox + x);
@@ -676,7 +622,12 @@ function spawnUnits() {
       { type: 'bastion', faction, x: fx(0), z: fz(1) },
       { type: 'infantry', faction, x: fx(1), z: fz(0) },
       { type: 'infantry', faction, x: fx(0), z: fz(2) },
+      { type: 'infantry', faction, x: fx(2), z: fz(1) },
+      { type: 'infantry', faction, x: fx(1), z: fz(2) },
+      { type: 'infantry', faction, x: fx(3), z: fz(0) },
       { type: 'archer', faction, x: fx(2), z: fz(0) },
+      { type: 'archer', faction, x: fx(0), z: fz(3) },
+      { type: 'archer', faction, x: fx(3), z: fz(1) },
       { type: 'archer', faction, x: fx(1), z: fz(1) },
     ];
   };
@@ -853,18 +804,10 @@ function faceBarsToCamera() {
   }
 }
 
-function animateCrystal() {
-  if (crystalMesh) {
-    crystalMesh.rotation.y += 0.015;
-    crystalMesh.position.y = 0.55 + Math.sin(performance.now() * 0.003) * 0.08;
-  }
-}
-
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
   faceBarsToCamera();
-  animateCrystal();
   renderer.render(scene, camera);
 }
 
@@ -925,19 +868,6 @@ function handleTap(e) {
     }
   }
 
-  // Crystal capture
-  if (crystalMesh) {
-    const cHits = raycaster.intersectObject(crystalMesh, true);
-    if (cHits.length && selected && !selected.moved) {
-      const cx = crystalMesh.userData.x;
-      const cz = crystalMesh.userData.z;
-      if (reachable.has(key(cx, cz)) && !unitAt(cx, cz)) {
-        doMove(selected, cx, cz);
-        checkCrystalCapture(selected);
-        return;
-      }
-    }
-  }
 
   // Tiles
   const tileMeshes = tiles.map((t) => t.mesh);
@@ -951,7 +881,6 @@ function handleTap(e) {
     }
     if (selected && !selected.moved && reachable.has(key(x, z)) && !unitAt(x, z)) {
       doMove(selected, x, z);
-      checkCrystalCapture(selected);
       return;
     }
     // Tap empty / own tile to deselect or select
@@ -1004,19 +933,11 @@ function pulseMesh(mesh) {
   setTimeout(() => mats.forEach((m) => { m.emissiveIntensity = 0.18; }), 200);
 }
 
-function checkCrystalCapture(unit) {
-  if (!crystalMesh || unit.faction !== 'player') return;
-  const cx = crystalMesh.userData.x;
-  const cz = crystalMesh.userData.z;
-  if (unit.x === cx && unit.z === cz) {
-    endGame(true, 'You seized the gold crystal. Gridfall is yours!');
-  }
-}
-
 function checkWinLose() {
-  // Victory is ONLY by occupying the crystal tile (see checkCrystalCapture).
   const pc = units.filter((u) => u.faction === 'player' && u.hp > 0).length;
-  if (pc === 0) endGame(false, 'Your army has fallen.');
+  const ec = units.filter((u) => u.faction !== 'player' && u.hp > 0).length;
+  if (ec === 0) endGame(true, 'All rival armies defeated. Gridfall is yours!');
+  else if (pc === 0) endGame(false, 'Your army has fallen.');
 }
 
 function endGame(win, msg) {
@@ -1084,21 +1005,12 @@ async function runAI() {
     if (checkWinLoseEarly()) return;
   }
 
-  // AI crystal capture check
-  if (crystalMesh) {
-    const cx = crystalMesh.userData.x;
-    const cz = crystalMesh.userData.z;
-    for (const u of units) {
-      if (u.faction !== 'player' && u.hp > 0 && u.x === cx && u.z === cz) {
-        endGame(false, `${ARMY_COLORS[u.faction]?.name || 'Enemy'} captured the crystal.`);
-        return;
-      }
-    }
-  }
 }
 
 function checkWinLoseEarly() {
   const pc = units.filter((u) => u.faction === 'player' && u.hp > 0).length;
+  const ec = units.filter((u) => u.faction !== 'player' && u.hp > 0).length;
+  if (ec === 0) { endGame(true, 'All rival armies defeated. Gridfall is yours!'); return true; }
   if (pc === 0) { endGame(false, 'Your army has fallen.'); return true; }
   return false;
 }
@@ -1118,10 +1030,10 @@ function aiAct(unit) {
     return;
   }
 
-  // Move toward nearest player, else crystal
+  // Move toward nearest player unit
   const players = units.filter((u) => u.faction === 'player' && u.hp > 0);
-  let goalX = crystalMesh ? crystalMesh.userData.x : Math.floor(GRID / 2) - 1;
-  let goalZ = crystalMesh ? crystalMesh.userData.z : Math.floor(GRID / 2) - 1;
+  let goalX = Math.floor(GRID / 2);
+  let goalZ = Math.floor(GRID / 2);
   if (players.length) {
     let best = null, bestD = Infinity;
     for (const p of players) {
