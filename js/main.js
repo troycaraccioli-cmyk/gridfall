@@ -258,22 +258,22 @@ function buildBoard() {
   pad.position.set(cp.x, 0.16, cp.z);
   pad.receiveShadow = true;
   boardGroup.add(pad);
-  const ring = new THREE.Mesh(
+  const padRing = new THREE.Mesh(
     new THREE.RingGeometry(TILE * 0.38, TILE * 0.48, 32),
     new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.85, side: THREE.DoubleSide })
   );
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.set(cp.x, 0.2, cp.z);
-  boardGroup.add(ring);
+  padRing.rotation.x = -Math.PI / 2;
+  padRing.position.set(cp.x, 0.2, cp.z);
+  boardGroup.add(padRing);
 
   // Soft glow ring
-  const ring = new THREE.Mesh(
+  const glowRing = new THREE.Mesh(
     new THREE.RingGeometry(0.5, 0.65, 32),
     new THREE.MeshBasicMaterial({ color: 0xffd266, transparent: true, opacity: 0.35, side: THREE.DoubleSide })
   );
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.set(cp.x, 0.16, cp.z);
-  boardGroup.add(ring);
+  glowRing.rotation.x = -Math.PI / 2;
+  glowRing.position.set(cp.x, 0.16, cp.z);
+  boardGroup.add(glowRing);
 }
 
 function makeArcherFigure(color) {

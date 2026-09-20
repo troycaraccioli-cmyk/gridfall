@@ -1,5 +1,5 @@
-/* Gridfall demo service worker — cache shell for offline reopen after first visit */
-const CACHE = 'gridfall-v1';
+/* Gridfall demo service worker — network-first so Play updates land quickly */
+const CACHE = 'gridfall-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -27,6 +27,26 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+  const url = new URL(event.request.url);
+  const isShell = url.origin === self.location.origin && (
+    url.pathname.endsWith('/js/main.js') ||
+    url.pathname.endsWith('/index.html') ||
+    url.pathname.endsWith('/sw.js') ||
+    url.pathname.endsWith('/gridfall/') ||
+    url.pathname.endsWith('/gridfall')
+  );
+  if (isShell || event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((cache) => cache.put(event.request, copy)).catch(() => {});
+          return res;
+        })
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
   event.respondWith(
     caches.match(event.request).then((cached) => {
       const network = fetch(event.request)
